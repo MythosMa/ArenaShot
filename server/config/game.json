@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "room": {
+    "maxPlayers": 4,
+    "tickRate": 20,
+    "respawnDelayMs": 4000,
+    "reconnectTimeoutMs": 15000,
+    "snapshotIntervalMs": 50,
+    "maxInputsPerSecond": 60
+  },
+  "player": {
+    "maxHp": 100,
+    "moveSpeed": 220,
+    "radius": 16,
+    "fireIntervalMs": 180,
+    "bulletSpeed": 620,
+    "bulletDamage": 18,
+    "bulletLifeMs": 1200,
+    "invincibleAfterRespawnMs": 1000
+  },
+  "items": {
+    "spawnIntervalMs": 5000,
+    "maxOnMap": 6,
+    "healAmount": 30,
+    "powerMultiplier": 1.5,
+    "powerDurationMs": 8000,
+    "speedMultiplier": 1.4,
+    "speedDurationMs": 8000
+  },
+  "obstacles": {
+    "breakableHp": 100,
+    "respawnMs": 15000
+  },
+  "map": {
+    "width": 1920,
+    "height": 1080,
+    "wallThickness": 32,
+    "spawnPoints": [
+      { "x": 240, "y": 240 },
+      { "x": 1680, "y": 240 },
+      { "x": 240, "y": 840 },
+      { "x": 1680, "y": 840 }
+    ],
+    "obstacles": [
+      { "id": "o_1", "type": "solid", "x": 960, "y": 540, "w": 160, "h": 160 },
+      { "id": "o_2", "type": "solid", "x": 480, "y": 540, "w": 96, "h": 240 },
+      { "id": "o_3", "type": "solid", "x": 1440, "y": 540, "w": 96, "h": 240 },
+      { "id": "o_4", "type": "solid", "x": 960, "y": 220, "w": 320, "h": 64 },
+      { "id": "o_5", "type": "solid", "x": 960, "y": 860, "w": 320, "h": 64 },
+      { "id": "o_6", "type": "breakable", "x": 240, "y": 540, "w": 80, "h": 80 },
+      { "id": "o_7", "type": "breakable", "x": 1680, "y": 540, "w": 80, "h": 80 },
+      { "id": "o_8", "type": "breakable", "x": 960, "y": 360, "w": 80, "h": 80 },
+      { "id": "o_9", "type": "breakable", "x": 960, "y": 720, "w": 80, "h": 80 }
+    ],
+    "itemSpawnPoints": [
+      { "x": 700, "y": 540 },
+      { "x": 1220, "y": 540 },
+      { "x": 960, "y": 160 },
+      { "x": 960, "y": 920 },
+      { "x": 480, "y": 220 },
+      { "x": 1440, "y": 860 },
+      { "x": 480, "y": 860 },
+      { "x": 1440, "y": 220 }
+    ]
+  }
+}

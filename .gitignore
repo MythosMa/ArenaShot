@@ -1,0 +1,23 @@
+# 全局忽略
+.DS_Store
+*.log
+
+# Cocos Creator 客户端（创建后放入 client/ 时生效）
+client/library/
+client/temp/
+client/build/
+client/local/
+client/node_modules/
+client/profiles/
+client/.creator/
+
+# Go 服务端
+server/bin/
+server/*.tmp
+
+# 私有文档：求职/面试/个人计划，绝不入库
+/private/
+
+# 编辑器/操作系统
+.idea/
+.vscode/
