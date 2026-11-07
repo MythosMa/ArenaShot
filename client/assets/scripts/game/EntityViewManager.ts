@@ -15,6 +15,7 @@ import { PlayerView } from './view/PlayerView';
 import { BulletView } from './view/BulletView';
 import { ObstacleView } from './view/ObstacleView';
 import { ItemView } from './view/ItemView';
+import { GameContext } from './GameContext';
 
 export interface ViewRoots {
     playersRoot: Node;
@@ -43,7 +44,9 @@ export class EntityViewManager {
 
     private readonly _bulletPool = new ObjectPool<PooledNode<BulletView>>(() => {
         const node = instantiate(this.prefabs.bullet);
-        return { node, view: node.getComponent(BulletView)! };
+        const view = node.getComponent(BulletView)!;
+        view.init();
+        return { node, view };
     });
 
     private readonly _itemPool = new ObjectPool<PooledNode<ItemView>>(() => {
@@ -127,7 +130,7 @@ export class EntityViewManager {
                     node.destroy();
                     continue;
                 }
-                view.init(p, p.id === 'local' || p.id === 'me', radius);
+                view.init(p, p.id === GameContext.myPlayerId || p.id === 'local', radius);
                 this._players.set(p.id, view);
             }
             view.apply(p);
@@ -148,7 +151,11 @@ export class EntityViewManager {
         this._bulletsToPool();
         for (const b of list) {
             const item = this._bulletPool.get();
-            item.node.parent = this.roots.bulletsRoot;
+            // 池化节点留在容器下仅隐藏，避免每帧反复从场景树摘除/挂回造成卡顿。
+            if (item.node.parent !== this.roots.bulletsRoot) {
+                item.node.parent = this.roots.bulletsRoot;
+            }
+            item.node.active = true;
             item.view.apply(b.x, b.y);
             this._activeBullets.push(item);
         }
@@ -158,7 +165,9 @@ export class EntityViewManager {
         this._itemsToPool();
         for (const it of list) {
             const item = this._itemPool.get();
-            item.node.parent = this.roots.itemsRoot;
+            if (item.node.parent !== this.roots.itemsRoot) {
+                item.node.parent = this.roots.itemsRoot;
+            }
             item.view.init(it.type);
             item.node.setPosition(this.toNode(it.x, it.y));
             this._activeItems.push(item);
@@ -167,7 +176,7 @@ export class EntityViewManager {
 
     private _bulletsToPool(): void {
         for (const item of this._activeBullets) {
-            item.node.removeFromParent();
+            item.node.active = false;
             this._bulletPool.put(item);
         }
         this._activeBullets = [];
@@ -175,7 +184,7 @@ export class EntityViewManager {
 
     private _itemsToPool(): void {
         for (const item of this._activeItems) {
-            item.node.removeFromParent();
+            item.node.active = false;
             this._itemPool.put(item);
         }
         this._activeItems = [];

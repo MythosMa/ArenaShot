@@ -26,6 +26,8 @@ export class PlayerView extends Component {
     private _bodyColor = new Color(120, 200, 120, 255);
     /** 受击闪白剩余时间，>0 时身体画白色。 */
     private _flashT = 0;
+    /** 已绘制的血量比例，用于避免每帧重建 Graphics。 */
+    private _hpRatio = -1;
 
     /** 由 EntityViewManager 在创建视图时调用一次。 */
     init(data: PlayerSnapshot, isLocal: boolean, radius: number): void {
@@ -40,8 +42,10 @@ export class PlayerView extends Component {
         if (this.nameLabel) {
             this.nameLabel.string = data.name;
         }
+        this._hpRatio = -1; // 强制重绘一次血条
         this.apply(data);
         this._redrawBody();
+        this._redrawAim();
     }
 
     /** 每帧 / 快照到达时应用最新的玩家快照。 */
@@ -84,6 +88,8 @@ export class PlayerView extends Component {
         if (!this.hpFill) return;
         this.hpFill.node.active = hp < maxHp;
         const ratio = Math.max(0, Math.min(1, hp / Math.max(1, maxHp)));
+        if (Math.abs(ratio - this._hpRatio) < 0.001) return; // 血量没变，不重建顶点
+        this._hpRatio = ratio;
         const g = this.hpFill;
         g.clear();
         if (ratio > 0) {
@@ -106,6 +112,31 @@ export class PlayerView extends Component {
         g.clear();
         g.fillColor = this._flashT > 0 ? Color.WHITE : this._bodyColor;
         g.circle(0, 0, this._radius);
+        g.fill();
+    }
+
+    /** 朝向指示：沿 +X 方向画一个箭头，由 aim 节点旋转表达朝向。 */
+    private _redrawAim(): void {
+        const n = this.aimNode;
+        if (!n) return;
+
+        const g = n.getComponent(Graphics);
+        if (!g) return;
+
+        const len = this._radius + 6;
+        g.clear();
+        g.strokeColor = new Color(255, 255, 255, 255);
+        g.lineWidth = 3;
+        // 箭杆
+        g.moveTo(this._radius * 0.4, 0);
+        g.lineTo(len, 0);
+        g.stroke();
+        // 箭头
+        g.fillColor = new Color(255, 255, 255, 255);
+        g.moveTo(len, 4);
+        g.lineTo(len + 6, 0);
+        g.lineTo(len, -4);
+        g.close();
         g.fill();
     }
 }

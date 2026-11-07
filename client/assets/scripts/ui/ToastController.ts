@@ -5,7 +5,7 @@
 import { _decorator, Component, Label, Tween, tween, UIOpacity } from 'cc';
 import { EventBus, Events } from '../core/EventBus';
 import { GameContext } from '../game/GameContext';
-import { ItemPickedEvent } from '../net/NetTypes';
+import { ItemPickedEvent, JoinResult } from '../net/NetTypes';
 
 const { ccclass, property } = _decorator;
 
@@ -28,6 +28,12 @@ export class ToastController extends Component {
 
         EventBus.instance.on<ItemPickedEvent>(Events.ItemPicked, this._onItem, this);
         EventBus.instance.on<unknown>(Events.ErrorToast, this._onError, this);
+        EventBus.instance.on<JoinResult>(Events.JoinResult, this._onJoinResult, this);
+
+        // 入场即观战（满员排队）：进入战斗场景后明确提示，避免“不能动”的困惑。
+        if (GameContext.queuePos > 0) {
+            this.scheduleOnce(() => this.show(`观战中，排队第 ${GameContext.queuePos} 位`), 0.3);
+        }
     }
 
     protected onDestroy(): void {
@@ -42,6 +48,19 @@ export class ToastController extends Component {
     private _onError(payload: unknown): void {
         const text = typeof payload === 'string' ? payload : '发生错误';
         this.show(text);
+    }
+
+    /** 入房后的再次加入结果：观战者被补位 / 补位后有空位就进战斗。 */
+    private _onJoinResult(res: JoinResult): void {
+        if (!res.success) return;
+        if (res.spectator) {
+            GameContext.queuePos = res.queuePos;
+            this.show(`观战中，排队第 ${res.queuePos} 位`);
+        } else {
+            const promoted = GameContext.queuePos > 0;
+            GameContext.queuePos = 0;
+            if (promoted) this.show('已补位进入战斗');
+        }
     }
 
     show(text: string): void {

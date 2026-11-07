@@ -59,7 +59,6 @@ export class LocalMockDriver {
     private readonly cfg: GameConfigData;
     private _now = Date.now();
     private _tick = 0;
-    private _lastTickAt = this._now;
     private _inputSeq = 0;
     private _pending: InputRequest | null = null;
 
@@ -97,14 +96,17 @@ export class LocalMockDriver {
         return { x: p.x, y: p.y };
     }
 
-    /** 推进模拟（固定 Tick）。dtMs 为渲染帧间隔，内部累积后按步长补帧。 */
+    /**
+     * 推进模拟。dtMs 为渲染帧间隔。
+     *
+     * 注意：P1 本地模拟直接按渲染帧推进，保证移动/子弹看起来连续丝滑；
+     * 真实服务端是固定 20Hz Tick，P2 接网络后由服务端权威快照决定世界状态，
+     * 客户端如需平滑再做插值，与本模拟器无关。
+     */
     update(dtMs: number): void {
+        if (dtMs > 100) dtMs = 100; // 切后台回来时不要一次推进太远
         this._now += dtMs;
-        const interval = this.cfg.room.snapshotIntervalMs;
-        while (this._now - this._lastTickAt >= interval) {
-            this._lastTickAt += interval;
-            this._step();
-        }
+        this._step(dtMs / 1000);
     }
 
     /** 构建当前快照（供 GameState / 视图消费）。 */
@@ -124,9 +126,9 @@ export class LocalMockDriver {
 
     // ---------------- 模拟核心 ----------------
 
-    private _step(): void {
+    /** 推进一步模拟。dt 为本次推进的秒数。 */
+    private _step(dt: number): void {
         this._tick++;
-        const dt = this.cfg.room.snapshotIntervalMs / 1000; // 秒
 
         this._applyLocalInput(dt);
         this._aiUpdate(dt);

@@ -26,7 +26,8 @@ export class InputController {
 
     private readonly _screenPos = new Vec3();
     private readonly _aimWorld = new Vec3();
-    private readonly _selfNode = new Vec3();
+    /** 本地玩家的世界坐标；必须与 camera.screenToWorld 的结果处于同一坐标系。 */
+    private readonly _selfWorld = new Vec3();
 
     private readonly _keyDown = (e: EventKeyboard): void => {
         if (KEY_UP.has(e.keyCode)) this.up = true;
@@ -66,9 +67,9 @@ export class InputController {
         input.on(Input.EventType.MOUSE_MOVE, this._mouseMove, this);
     }
 
-    /** 每帧把「我的可视位置」告诉输入层，用于计算瞄准方向。 */
-    setSelfNodePos(x: number, y: number): void {
-        this._selfNode.set(x, y, 0);
+    /** 每帧把「我的世界坐标」告诉输入层，用于计算瞄准方向。 */
+    setSelfWorldPos(x: number, y: number): void {
+        this._selfWorld.set(x, y, 0);
     }
 
     /** 采样一帧输入。 */
@@ -87,10 +88,15 @@ export class InputController {
             moveY *= inv;
         }
 
-        // 瞄准：鼠标屏幕坐标 -> 世界坐标 -> 服务器角度
-        this.camera.screenToWorld(this._aimWorld, this._screenPos);
-        const dx = this._aimWorld.x - this._selfNode.x;
-        const dy = this._aimWorld.y - this._selfNode.y;
+        // 瞄准：鼠标屏幕坐标 -> 世界坐标 -> 服务器角度。
+        // 注意 screenToWorld(screenPos, out) 的第一个参数是屏幕坐标，第二个才是输出，
+        // 写反了会把 (0,0) 当成鼠标位置，导致朝向恒指向屏幕左下角。
+        // 另外 screenToWorld 返回「世界坐标」，玩家节点位于 Canvas 局部坐标系
+        // （原点在屏幕中心），两者必须用同一个坐标系相减。世界与节点坐标系轴向一致，
+        // 可直接复用该角度转换。
+        this.camera.screenToWorld(this._screenPos, this._aimWorld);
+        const dx = this._aimWorld.x - this._selfWorld.x;
+        const dy = this._aimWorld.y - this._selfWorld.y;
         const aim = Coord.nodeDirToServerAngle(dx, dy);
 
         const useItem = this.useItemQueued;

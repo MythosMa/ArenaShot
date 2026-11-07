@@ -1,7 +1,7 @@
 // ArenaShot 服务端入口。
 //
 // 职责：加载配置、装配 HTTP（健康检查/配置接口）、启动 WebSocket 网关，
-// 并运行共享同一份配置的房间。当前阶段只提供 HTTP 接口，WebSocket 网关在 P2 接入。
+// 并运行共享同一份配置的房间。
 package main
 
 import (
@@ -17,6 +17,10 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"arena/server/internal/config"
+	"arena/server/internal/game"
+	"arena/server/internal/gateway"
+	"arena/server/internal/protocol"
+	"arena/server/internal/session"
 )
 
 var version = "0.1.0" // 构建时可用 -ldflags 覆盖
@@ -33,11 +37,19 @@ func main() {
 	log.Printf("[main] 配置加载成功 (version=%d, maxPlayers=%d, tickRate=%d)",
 		cfg.Version, cfg.Room.MaxPlayers, cfg.Room.TickRate)
 
+	codec := protocol.NewJSONCodec()
+	sessions := session.NewManager()
+
+	// 房间循环独立 goroutine，持有全部权威世界状态。
+	room := game.NewRoom(cfg, codec)
+	go room.Run()
+
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(gin.Recovery())
 
 	registerHTTP(router, cfg)
+	gateway.New(cfg, room, codec, sessions).Register(router)
 
 	srv := &http.Server{
 		Addr:    *addr,
@@ -56,6 +68,7 @@ func main() {
 		if err := srv.Shutdown(ctx); err != nil {
 			log.Printf("[main] 关闭出错: %v", err)
 		}
+		room.Stop()
 	}()
 
 	log.Printf("[main] HTTP 服务启动: %s", *addr)

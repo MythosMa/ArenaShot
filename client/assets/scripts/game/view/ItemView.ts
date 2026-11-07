@@ -17,13 +17,18 @@ const ITEM_COLORS: Record<string, Color> = {
 export class ItemView extends Component {
     @property(Graphics) gfx: Graphics = null!;
 
+    /** 当前绘制类型；相同类型复用节点时跳过重绘。 */
+    private _type = '';
+
     init(type: string): void {
+        this.node.active = true;
+        if (this._type === type) return; // 每帧同步都调用 init，型别没变就不重绘
+        this._type = type;
         const g = this.gfx;
         g.clear();
         g.fillColor = ITEM_COLORS[type] ?? Color.WHITE;
         g.rect(-14, -14, 28, 28);
         g.fill();
-        this.node.active = true;
     }
 
     /** 进入战斗场景后给一块小旋转，作为拾取提醒。 */

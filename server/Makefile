@@ -27,7 +27,7 @@ tidy:
 	$(GO) mod tidy
 
 test:
-	$(GO) test ./...
+	$(GO) test -ldflags="$(LDFLAGS)" ./...
 
 clean:
 	rm -rf bin

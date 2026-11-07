@@ -17,13 +17,22 @@ export class DamageTextView extends Component {
     /** 该视图是否正在播放。 */
     playing = false;
 
-    play(text: string, colorHex: string): void {
+    /**
+     * 在指定位置播放一次飘字。
+     *
+     * 位置由这里统一设置：池复用时要先停掉上一轮残留的 tween，
+     * 否则旧的 position tween 会和新的同时写节点位置，出现乱飘/跳位。
+     */
+    play(text: string, colorHex: string, x: number, y: number): void {
+        this.stopAll(); // 会重置 playing，必须在下面重新置位
         this.playing = true;
         this.node.active = true;
+
+        this.node.setPosition(x, y, 0);
+        this.node.setScale(1, 1, 1);
+
         this.label.string = text;
         this.label.color = new Color().fromHEX(colorHex);
-        this.node.setPosition(0, 0, 0);
-        this.node.setScale(1, 1, 1);
 
         const uiOpacity = this.node.getComponent(UIOpacity) ?? this.node.addComponent(UIOpacity);
         if (uiOpacity) {

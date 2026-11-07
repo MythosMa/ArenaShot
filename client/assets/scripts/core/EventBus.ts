@@ -85,7 +85,7 @@ export class EventBus {
         // 复制一份，避免处理器内部增删订阅导致遍历异常。
         for (const sub of list.slice()) {
             try {
-                sub.handler(payload);
+                sub.handler.call(sub.target, payload);
             } catch (err) {
                 console.error(`[EventBus] 处理事件 "${event}" 时出错:`, err);
             }
