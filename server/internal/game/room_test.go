@@ -103,6 +103,33 @@ func TestSpectatorQueueAndPromotion(t *testing.T) {
 	}
 }
 
+// TestSpectatorQueuePositionsRefresh 回归：前面的观战者离开后，
+// 剩余观战者应收到更新后的排队序号。
+func TestSpectatorQueuePositionsRefresh(t *testing.T) {
+	cfg := loadTestConfig(t)
+	room := NewRoom(cfg, protocol.NewJSONCodec())
+	go room.Run()
+	defer room.Stop()
+
+	for i := 0; i < cfg.Room.MaxPlayers; i++ {
+		room.Join(newFakePeer(), fmt.Sprintf("p_%d", i), fmt.Sprintf("s_%d", i), fmt.Sprintf("玩家%d", i))
+	}
+	a := newFakePeer()
+	b := newFakePeer()
+	resA, _ := room.Join(a, "p_a", "s_a", "A")
+	resB, _ := room.Join(b, "p_b", "s_b", "B")
+	if resA.QueuePos != 1 || resB.QueuePos != 2 {
+		t.Fatalf("初始排队位置异常: A=%d B=%d", resA.QueuePos, resB.QueuePos)
+	}
+
+	room.Leave("p_a")
+
+	upd := waitForType[protocol.JoinResult](t, b, protocol.S2CJoinResult, 2*time.Second)
+	if !upd.Success || !upd.Spectator || upd.QueuePos != 1 {
+		t.Fatalf("剩余观战者序号应更新为 1: %+v", upd)
+	}
+}
+
 func TestSnapshotsAreBroadcast(t *testing.T) {
 	cfg := loadTestConfig(t)
 	room := NewRoom(cfg, protocol.NewJSONCodec())

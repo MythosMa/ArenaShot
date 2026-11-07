@@ -276,6 +276,7 @@ func (r *Room) handleLeave(playerID string) reply {
 		r.cast(protocol.S2CPlayerLeave, protocol.PlayerLeaveEvent{ID: playerID, Name: name})
 		log.Printf("[room] 玩家离开: %s(%s) %d/%d", name, playerID, len(r.participants), r.cfg.Room.MaxPlayers)
 		r.promoteSpectators()
+		r.notifySpectatorPositions()
 		return reply{roomInfo: r.roomInfo()}
 	}
 
@@ -283,10 +284,22 @@ func (r *Room) handleLeave(playerID string) reply {
 		if s.playerID == playerID {
 			r.spectators = append(r.spectators[:i], r.spectators[i+1:]...)
 			log.Printf("[room] 观战者离开: %s", s.name)
+			r.notifySpectatorPositions()
 			break
 		}
 	}
 	return reply{roomInfo: r.roomInfo()}
+}
+
+// notifySpectatorPositions 在队列变化后，把最新排队序号推给仍在排队的观战者。
+func (r *Room) notifySpectatorPositions() {
+	for i, s := range r.spectators {
+		r.sendTo(s.peer, protocol.S2CJoinResult, protocol.JoinResult{
+			Success:   true,
+			Spectator: true,
+			QueuePos:  i + 1,
+		})
+	}
 }
 
 // spawnPlayer 在世界上创建玩家并登记连接，同时广播加入事件。
@@ -337,6 +350,9 @@ func (r *Room) roomInfo() protocol.RoomInfo {
 
 // broadcastSnapshot 每 tick 向所有参与者广播一次全量快照。
 func (r *Room) broadcastSnapshot() {
+	if len(r.participants) == 0 && len(r.spectators) == 0 {
+		return
+	}
 	snap := r.world.Snapshot()
 	raw, err := r.codec.Encode(protocol.S2CSnapshot, snap.Tick, snap)
 	if err != nil {

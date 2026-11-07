@@ -83,6 +83,8 @@ export class LoginController extends Component {
       // 下一帧再切场景，确保当前按钮事件处理完毕
       this.scheduleOnce(() => director.loadScene("Game"), 0);
     } catch (err) {
+      // 登录/入房任一步失败都断开连接，否则重试会复用已登录的连接并收到 409。
+      NetClient.instance.close();
       this._starting = false;
       if (this.startButton) this.startButton.interactable = true;
       this._setStatus(`连接失败: ${(err as Error).message}`);

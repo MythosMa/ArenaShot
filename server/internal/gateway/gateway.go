@@ -317,7 +317,7 @@ func (c *Client) handleLeave(env *protocol.Envelope) {
 	}
 
 	info := c.g.room.Leave(sess.PlayerID)
-	c.markJoined(false)
+	c.markLeft()
 	c.sendMsg(protocol.S2CRoomInfo, info)
 }
 
@@ -358,6 +358,14 @@ func (c *Client) markJoined(playing bool) {
 	c.mu.Lock()
 	c.joined = true
 	c.playing = playing
+	c.mu.Unlock()
+}
+
+// markLeft 在主动离开房间后清除加入状态，允许同一连接重新加入/观战。
+func (c *Client) markLeft() {
+	c.mu.Lock()
+	c.joined = false
+	c.playing = false
 	c.mu.Unlock()
 }
 

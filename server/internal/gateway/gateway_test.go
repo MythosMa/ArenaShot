@@ -262,6 +262,42 @@ func TestPromotedSpectatorCanMove(t *testing.T) {
 	}
 }
 
+// TestLeaveAllowsRejoin 回归：主动离开后同一连接应能重新加入。
+// 此前 markJoined 恒定置 true，导致 leave 后 join/spectate 一直被判定为「已在房间中」。
+func TestLeaveAllowsRejoin(t *testing.T) {
+	cfg := loadTestConfig(t)
+	codec := protocol.NewJSONCodec()
+
+	room := game.NewRoom(cfg, codec)
+	go room.Run()
+	defer room.Stop()
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	New(cfg, room, codec, session.NewManager()).Register(router)
+
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+
+	conn := mustDial(t, wsURL)
+	defer conn.Close()
+	loginAndJoin(t, conn, codec, "Alice")
+
+	writeEnv(t, conn, codec, protocol.C2SLeave, 3, struct{}{})
+	waitFor(t, conn, codec, protocol.S2CRoomInfo, 2*time.Second, nil)
+
+	writeEnv(t, conn, codec, protocol.C2SJoin, 4, struct{}{})
+	data := waitFor(t, conn, codec, protocol.S2CJoinResult, 2*time.Second, nil)
+	var res protocol.JoinResult
+	if err := json.Unmarshal(data, &res); err != nil {
+		t.Fatalf("解析重新加入结果失败: %v", err)
+	}
+	if !res.Success || res.Spectator {
+		t.Fatalf("离开后应能重新加入战斗: %+v", res)
+	}
+}
+
 func waitSnapshot(t *testing.T, conn *websocket.Conn, codec protocol.Codec, pred func(protocol.Snapshot) bool, timeout time.Duration) protocol.Snapshot {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
