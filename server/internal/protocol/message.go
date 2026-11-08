@@ -8,11 +8,11 @@ import "encoding/json"
 
 // 客户端 -> 服务端 消息类型。
 const (
-	C2SLogin = "c2s_login" // 登录/重连
-	C2SInput = "c2s_input" // 操作输入
-	C2SJoin  = "c2s_join"  // 请求加入战斗
-	C2SPing  = "c2s_ping"  // 心跳与 RTT 测量
-	C2SLeave = "c2s_leave" // 主动离开
+	C2SLogin    = "c2s_login"    // 登录/重连
+	C2SInput    = "c2s_input"    // 操作输入
+	C2SJoin     = "c2s_join"     // 请求加入战斗
+	C2SPing     = "c2s_ping"     // 心跳与 RTT 测量
+	C2SLeave    = "c2s_leave"    // 主动离开
 	C2SSpectate = "c2s_spectate" // 请求观战
 )
 
@@ -51,20 +51,20 @@ type LoginRequest struct {
 
 // LoginResponse 登录成功响应。
 type LoginResponse struct {
-	PlayerID     string `json:"playerId"`
-	SessionID    string `json:"sessionId"`
-	ConfigVersion int   `json:"configVersion"`
-	ServerTime   int64  `json:"serverTime"`
+	PlayerID      string `json:"playerId"`
+	SessionID     string `json:"sessionId"`
+	ConfigVersion int    `json:"configVersion"`
+	ServerTime    int64  `json:"serverTime"`
 }
 
 // InputRequest 单帧操作输入。所有字段都只是「意图」，最终结果由服务端计算。
 type InputRequest struct {
-	MoveX     float64 `json:"moveX"`     // -1 ~ 1
-	MoveY     float64 `json:"moveY"`     // -1 ~ 1
-	Aim       float64 `json:"aim"`       // 弧度
-	Fire      bool    `json:"fire"`
-	UseItem   bool    `json:"useItem"`
-	ClientTime int64  `json:"clientTime"` // 客户端本地时间，用于延迟统计
+	MoveX      float64 `json:"moveX"` // -1 ~ 1
+	MoveY      float64 `json:"moveY"` // -1 ~ 1
+	Aim        float64 `json:"aim"`   // 弧度
+	Fire       bool    `json:"fire"`
+	UseItem    bool    `json:"useItem"`
+	ClientTime int64   `json:"clientTime"` // 客户端本地时间，用于延迟统计
 }
 
 // PingRequest 心跳请求。
@@ -86,18 +86,21 @@ type Vec2 struct {
 
 // PlayerSnapshot 玩家在某一帧的状态。
 type PlayerSnapshot struct {
-	ID        string         `json:"id"`
-	Name      string         `json:"name"`
-	X         float64        `json:"x"`
-	Y         float64        `json:"y"`
-	Aim       float64        `json:"aim"`
-	Hp        int            `json:"hp"`
-	MaxHp     int            `json:"maxHp"`
-	Alive     bool           `json:"alive"`
-	RespawnAt int64          `json:"respawnAt"` // 复活时间戳（毫秒），未死亡为 0
-	Buffs     map[string]int64 `json:"buffs"`   // buff 名称 -> 结束时间戳
-	Kills     int            `json:"kills"`
-	Deaths    int            `json:"deaths"`
+	ID        string           `json:"id"`
+	Name      string           `json:"name"`
+	X         float64          `json:"x"`
+	Y         float64          `json:"y"`
+	Aim       float64          `json:"aim"`
+	Hp        int              `json:"hp"`
+	MaxHp     int              `json:"maxHp"`
+	Alive     bool             `json:"alive"`
+	RespawnAt int64            `json:"respawnAt"` // 复活时间戳（毫秒），未死亡为 0
+	Buffs     map[string]int64 `json:"buffs"`     // buff 名称 -> 结束时间戳
+	Kills     int              `json:"kills"`
+	Deaths    int              `json:"deaths"`
+	// LastProcessedSeq 是该玩家被服务端接受的最后一个输入封套序号，
+	// 用于客户端预测回滚/校正。按玩家下发，避免与其他人的输入混在一起。
+	LastProcessedSeq uint64 `json:"lastProcessedSeq"`
 }
 
 // BulletSnapshot 子弹状态。
@@ -137,14 +140,13 @@ type LeaderboardEntry struct {
 
 // Snapshot 全量世界快照。4 人规模下全量广播最简单也最稳。
 type Snapshot struct {
-	Tick         uint64             `json:"tick"`
-	ServerTime   int64              `json:"serverTime"`
-	LastProcessedSeq uint64         `json:"lastProcessedSeq"` // 用于客户端预测校正
-	Players      []PlayerSnapshot   `json:"players"`
-	Bullets      []BulletSnapshot   `json:"bullets"`
-	Obstacles    []ObstacleSnapshot `json:"obstacles"`
-	Items        []ItemSnapshot     `json:"items"`
-	Leaderboard  []LeaderboardEntry `json:"leaderboard"`
+	Tick        uint64             `json:"tick"`
+	ServerTime  int64              `json:"serverTime"`
+	Players     []PlayerSnapshot   `json:"players"`
+	Bullets     []BulletSnapshot   `json:"bullets"`
+	Obstacles   []ObstacleSnapshot `json:"obstacles"`
+	Items       []ItemSnapshot     `json:"items"`
+	Leaderboard []LeaderboardEntry `json:"leaderboard"`
 }
 
 // HitEvent 命中事件，用于播放受击表现。
@@ -173,9 +175,9 @@ type ObstacleBrokenEvent struct {
 
 // ItemPickedEvent 道具被拾取事件。
 type ItemPickedEvent struct {
-	PlayerID string `json:"playerId"`
-	ItemID   string `json:"itemId"`
-	ItemType string `json:"itemType"`
+	PlayerID string  `json:"playerId"`
+	ItemID   string  `json:"itemId"`
+	ItemType string  `json:"itemType"`
 	X        float64 `json:"x"`
 	Y        float64 `json:"y"`
 }

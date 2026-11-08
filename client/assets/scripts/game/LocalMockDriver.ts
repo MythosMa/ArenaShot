@@ -115,7 +115,6 @@ export class LocalMockDriver {
         return {
             tick: this._tick,
             serverTime: this._now,
-            lastProcessedSeq: this._inputSeq,
             players: this.players.map((p) => this._playerSnap(p)),
             bullets: this.bullets.map((b) => ({ id: b.id, owner: b.owner, x: b.x, y: b.y, vx: b.vx, vy: b.vy } as BulletSnapshot)),
             obstacles: this.obstacles.map((o) => ({ id: o.id, type: o.type, broken: o.broken, hp: o.hp, respawnAt: o.respawnAt } as ObstacleSnapshot)),
@@ -442,6 +441,8 @@ export class LocalMockDriver {
             id: p.id, name: p.name, x: p.x, y: p.y, aim: p.aim,
             hp: p.hp, maxHp: p.maxHp, alive: p.alive, respawnAt: p.respawnAt,
             buffs, kills: p.kills, deaths: p.deaths,
+            // 本地模拟中只有 players[0] 是玩家本人，其余为 AI。
+            lastProcessedSeq: p === this.players[0] ? this._inputSeq : 0,
         };
     }
 

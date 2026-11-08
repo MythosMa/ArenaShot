@@ -298,6 +298,108 @@ func TestLeaveAllowsRejoin(t *testing.T) {
 	}
 }
 
+// TestReconnectRestoresPlayer 回归：断线后带 sessionId 重新登录并加入，
+// 应复用原 PlayerID 与战斗实体（位置保留）。
+func TestReconnectRestoresPlayer(t *testing.T) {
+	cfg := loadTestConfig(t)
+	codec := protocol.NewJSONCodec()
+
+	room := game.NewRoom(cfg, codec)
+	go room.Run()
+	defer room.Stop()
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	New(cfg, room, codec, session.NewManager()).Register(router)
+
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+
+	// 第一次连接：登录 + 加入 + 移动一段距离。
+	conn1 := mustDial(t, wsURL)
+	writeEnv(t, conn1, codec, protocol.C2SLogin, 1, protocol.LoginRequest{Name: "Alice"})
+	loginData := waitFor(t, conn1, codec, protocol.S2CLoginOK, 2*time.Second, nil)
+	var lr protocol.LoginResponse
+	if err := json.Unmarshal(loginData, &lr); err != nil {
+		t.Fatalf("解析登录响应失败: %v", err)
+	}
+	if lr.SessionID == "" || lr.PlayerID == "" {
+		t.Fatalf("登录响应缺字段: %+v", lr)
+	}
+
+	writeEnv(t, conn1, codec, protocol.C2SJoin, 2, struct{}{})
+	waitFor(t, conn1, codec, protocol.S2CJoinResult, 2*time.Second, func(raw json.RawMessage) bool {
+		var res protocol.JoinResult
+		return json.Unmarshal(raw, &res) == nil && res.Success && !res.Spectator
+	})
+	waitSnapshot(t, conn1, codec, func(s protocol.Snapshot) bool { return len(s.Players) == 1 }, 2*time.Second)
+
+	for i := 0; i < 4; i++ {
+		writeEnv(t, conn1, codec, protocol.C2SInput, uint64(10+i), protocol.InputRequest{MoveX: 1})
+		time.Sleep(40 * time.Millisecond)
+	}
+	moved := waitSnapshot(t, conn1, codec, func(s protocol.Snapshot) bool {
+		for _, p := range s.Players {
+			if p.Name == "Alice" {
+				return p.X > 241
+			}
+		}
+		return false
+	}, 3*time.Second)
+	var beforeX float64
+	for _, p := range moved.Players {
+		if p.Name == "Alice" {
+			beforeX = p.X
+		}
+	}
+
+	// 断线，等网关/房间处理完断开通知。
+	conn1.Close()
+	time.Sleep(150 * time.Millisecond)
+
+	// 第二次连接：带 sessionId 重连，应复用原身份。
+	conn2 := mustDial(t, wsURL)
+	defer conn2.Close()
+	writeEnv(t, conn2, codec, protocol.C2SLogin, 1, protocol.LoginRequest{Name: "Alice", SessionID: lr.SessionID})
+	reLogin := waitFor(t, conn2, codec, protocol.S2CLoginOK, 2*time.Second, nil)
+	var lr2 protocol.LoginResponse
+	if err := json.Unmarshal(reLogin, &lr2); err != nil {
+		t.Fatalf("解析重连登录响应失败: %v", err)
+	}
+	if lr2.PlayerID != lr.PlayerID {
+		t.Fatalf("重连后 PlayerID 改变: %s -> %s", lr.PlayerID, lr2.PlayerID)
+	}
+
+	writeEnv(t, conn2, codec, protocol.C2SJoin, 2, struct{}{})
+	reJoin := waitFor(t, conn2, codec, protocol.S2CJoinResult, 2*time.Second, nil)
+	var rres protocol.JoinResult
+	if err := json.Unmarshal(reJoin, &rres); err != nil {
+		t.Fatalf("解析重连加入结果失败: %v", err)
+	}
+	if !rres.Success || rres.Spectator {
+		t.Fatalf("重连应成功加入战斗: %+v", rres)
+	}
+
+	restored := waitSnapshot(t, conn2, codec, func(s protocol.Snapshot) bool {
+		for _, p := range s.Players {
+			if p.ID == lr.PlayerID {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second)
+	var afterX float64
+	for _, p := range restored.Players {
+		if p.ID == lr.PlayerID {
+			afterX = p.X
+		}
+	}
+	if afterX+0.5 < beforeX {
+		t.Fatalf("重连后位置回退: before=%v after=%v", beforeX, afterX)
+	}
+}
+
 func waitSnapshot(t *testing.T, conn *websocket.Conn, codec protocol.Codec, pred func(protocol.Snapshot) bool, timeout time.Duration) protocol.Snapshot {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

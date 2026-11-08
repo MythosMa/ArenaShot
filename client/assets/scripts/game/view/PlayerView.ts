@@ -29,6 +29,23 @@ export class PlayerView extends Component {
     /** 已绘制的血量比例，用于避免每帧重建 Graphics。 */
     private _hpRatio = -1;
 
+    // ---- 快照插值状态（网络模式 20Hz -> 60fps 平滑）----
+    /** 服务器坐标下的当前渲染位置。 */
+    private _curX = 0;
+    private _curY = 0;
+    private _fromX = 0;
+    private _fromY = 0;
+    private _toX = 0;
+    private _toY = 0;
+    /** 当前插值进度 0~1，1 表示已就位。 */
+    private _moveT = 1;
+    private _moveDurSec = 0.05;
+    /** 上一快照的存活状态，用于复活瞬间直接落位。 */
+    private _wasAlive = true;
+    /** 视角角度（弧度）插值起点，未插值时跟随 _to。 */
+    private _fromAim = 0;
+    private _toAim = 0;
+
     /** 由 EntityViewManager 在创建视图时调用一次。 */
     init(data: PlayerSnapshot, isLocal: boolean, radius: number): void {
         this._radius = radius;
@@ -43,17 +60,38 @@ export class PlayerView extends Component {
             this.nameLabel.string = data.name;
         }
         this._hpRatio = -1; // 强制重绘一次血条
-        this.apply(data);
+        this.apply(data, 0);
         this._redrawBody();
         this._redrawAim();
     }
 
-    /** 每帧 / 快照到达时应用最新的玩家快照。 */
-    apply(snap: PlayerSnapshot): void {
-        this.node.setPosition(Coord.toNode(snap.x, snap.y));
-        if (this.aimNode) {
-            this.aimNode.angle = Coord.serverAngleToNodeDeg(snap.aim);
+    /**
+     * 应用最新玩家快照。
+     * @param interpMs 非 0 时从「当前渲染位置」向快照位置线性插值，
+     *                 消除 20Hz 快照的跳变；0 表示直接落位（本地模拟/首帧/复活）。
+     */
+    apply(snap: PlayerSnapshot, interpMs = 0): void {
+        if (interpMs > 0 && this._wasAlive && snap.alive) {
+            this._fromX = this._curX;
+            this._fromY = this._curY;
+            this._toX = snap.x;
+            this._toY = snap.y;
+            this._fromAim = this._toAim;
+            this._toAim = snap.aim;
+            this._moveT = 0;
+            this._moveDurSec = interpMs / 1000;
+        } else {
+            // 直接落位：初始化、本地模拟、或生死状态刚变化（避免复活瞬间横穿地图）。
+            this._curX = this._fromX = this._toX = snap.x;
+            this._curY = this._fromY = this._toY = snap.y;
+            this._toAim = snap.aim;
+            this._moveT = 1;
+            if (this.aimNode) {
+                this.aimNode.angle = Coord.serverAngleToNodeDeg(snap.aim);
+            }
+            this.node.setPosition(Coord.toNode(snap.x, snap.y));
         }
+        this._wasAlive = snap.alive;
         this.node.active = snap.alive;
         this._updateHp(snap.hp, snap.maxHp);
     }
@@ -75,13 +113,33 @@ export class PlayerView extends Component {
         this.node.destroy();
     }
 
-    protected update(): void {
+    protected update(dt: number): void {
         if (this._flashT > 0) {
-            this._flashT -= 0.016;
+            this._flashT -= dt;
             if (this._flashT <= 0) {
                 this._redrawBody();
             }
         }
+
+        if (this._moveT < 1) {
+            this._moveT = Math.min(1, this._moveT + dt / Math.max(this._moveDurSec, 0.001));
+            const t = this._moveT;
+            this._curX = this._fromX + (this._toX - this._fromX) * t;
+            this._curY = this._fromY + (this._toY - this._fromY) * t;
+            this.node.setPosition(Coord.toNode(this._curX, this._curY));
+            if (this.aimNode) {
+                const aim = PlayerView._lerpAngle(this._fromAim, this._toAim, t);
+                this.aimNode.angle = Coord.serverAngleToNodeDeg(aim);
+            }
+        }
+    }
+
+    /** 最短弧插值角度，避免跨 ±π 边界时方向转一整圈。 */
+    private static _lerpAngle(from: number, to: number, t: number): number {
+        let d = to - from;
+        while (d > Math.PI) d -= Math.PI * 2;
+        while (d < -Math.PI) d += Math.PI * 2;
+        return from + d * t;
     }
 
     private _updateHp(hp: number, maxHp: number): void {

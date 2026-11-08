@@ -54,9 +54,12 @@ export class EntityViewManager {
         return { node, view: node.getComponent(ItemView)! };
     });
 
-    /** 当前帧正在显示（已挂到容器下）的子弹/道具。 */
-    private _activeBullets: PooledNode<BulletView>[] = [];
+    /** 当前正在显示的子弹/道具。子弹按 ID 复用节点以便插值。 */
+    private readonly _bulletsById = new Map<string, PooledNode<BulletView>>();
     private _activeItems: PooledNode<ItemView>[] = [];
+
+    /** 上一次快照到达时间，用于估算快照间隔（插值时长）。 */
+    private _lastSyncMs = 0;
 
     constructor(
         private readonly roots: ViewRoots,
@@ -84,11 +87,27 @@ export class EntityViewManager {
         }
     }
 
-    /** 同步整个快照到视图。 */
-    sync(snapshot: Snapshot): void {
-        this._syncPlayers(snapshot.players);
+    /**
+     * 同步整个快照到视图。
+     * @param interpolate 网络模式下传 true：位置按「上一快照 -> 本快照」平滑过渡，
+     *                    避免 20Hz 快照在 60fps 屏幕上跳变；本地逐帧模拟传 false。
+     */
+    sync(snapshot: Snapshot, interpolate = false): void {
+        let interpMs = 0;
+        if (interpolate) {
+            const now = Date.now();
+            if (this._lastSyncMs > 0) {
+                // 限幅：卡顿/切后台后不要用超长时长插值，直接追到最新。
+                interpMs = Math.min(200, Math.max(20, now - this._lastSyncMs));
+            }
+            this._lastSyncMs = now;
+        } else {
+            this._lastSyncMs = 0;
+        }
+
+        this._syncPlayers(snapshot.players, interpMs);
         this._syncObstacles(snapshot.obstacles);
-        this._syncBullets(snapshot.bullets);
+        this._syncBullets(snapshot.bullets, interpMs);
         this._syncItems(snapshot.items);
     }
 
@@ -102,7 +121,11 @@ export class EntityViewManager {
             v.destroyView();
         }
         this._players.clear();
-        this._bulletsToPool();
+        for (const item of this._bulletsById.values()) {
+            item.node.active = false;
+            this._bulletPool.put(item);
+        }
+        this._bulletsById.clear();
         this._itemsToPool();
         this._bulletPool.clear();
         this._itemPool.clear();
@@ -110,7 +133,7 @@ export class EntityViewManager {
 
     // ---------------- 私有实现 ----------------
 
-    private _syncPlayers(list: PlayerSnapshot[]): void {
+    private _syncPlayers(list: PlayerSnapshot[], interpMs: number): void {
         const aliveIds = new Set(list.map((p) => p.id));
         for (const [id, view] of this._players) {
             if (!aliveIds.has(id)) {
@@ -133,7 +156,7 @@ export class EntityViewManager {
                 view.init(p, p.id === GameContext.myPlayerId || p.id === 'local', radius);
                 this._players.set(p.id, view);
             }
-            view.apply(p);
+            view.apply(p, interpMs);
         }
     }
 
@@ -146,18 +169,31 @@ export class EntityViewManager {
         }
     }
 
-    /** 子弹数量少且生命周期短：每帧归还旧视图并复用池，不销毁节点。 */
-    private _syncBullets(list: BulletSnapshot[]): void {
-        this._bulletsToPool();
+    /** 子弹按 ID 复用节点：同一颗子弹在快照间做位置插值，消失时归还池。 */
+    private _syncBullets(list: BulletSnapshot[], interpMs: number): void {
+        const alive = new Set<string>();
         for (const b of list) {
-            const item = this._bulletPool.get();
-            // 池化节点留在容器下仅隐藏，避免每帧反复从场景树摘除/挂回造成卡顿。
-            if (item.node.parent !== this.roots.bulletsRoot) {
-                item.node.parent = this.roots.bulletsRoot;
+            alive.add(b.id);
+            const item = this._bulletsById.get(b.id);
+            if (item) {
+                item.view.apply(b, interpMs);
+            } else {
+                const fresh = this._bulletPool.get();
+                // 池化节点留在容器下仅隐藏，避免每帧反复从场景树摘除/挂回造成卡顿。
+                if (fresh.node.parent !== this.roots.bulletsRoot) {
+                    fresh.node.parent = this.roots.bulletsRoot;
+                }
+                fresh.node.active = true;
+                fresh.view.apply(b, 0); // 初次出现直接落位
+                this._bulletsById.set(b.id, fresh);
             }
-            item.node.active = true;
-            item.view.apply(b.x, b.y);
-            this._activeBullets.push(item);
+        }
+        for (const [id, item] of this._bulletsById) {
+            if (!alive.has(id)) {
+                item.node.active = false;
+                this._bulletPool.put(item);
+                this._bulletsById.delete(id);
+            }
         }
     }
 
@@ -172,14 +208,6 @@ export class EntityViewManager {
             item.node.setPosition(this.toNode(it.x, it.y));
             this._activeItems.push(item);
         }
-    }
-
-    private _bulletsToPool(): void {
-        for (const item of this._activeBullets) {
-            item.node.active = false;
-            this._bulletPool.put(item);
-        }
-        this._activeBullets = [];
     }
 
     private _itemsToPool(): void {

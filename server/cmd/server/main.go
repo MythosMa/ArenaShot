@@ -42,6 +42,8 @@ func main() {
 
 	// 房间循环独立 goroutine，持有全部权威世界状态。
 	room := game.NewRoom(cfg, codec)
+	// 玩家被彻底移除（主动离开或重连超时）时回收会话。
+	room.SetOnPlayerGone(sessions.Delete)
 	go room.Run()
 
 	gin.SetMode(gin.ReleaseMode)

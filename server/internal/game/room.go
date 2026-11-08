@@ -16,8 +16,12 @@ type Peer interface {
 }
 
 type participant struct {
-	peer Peer
-	name string
+	peer      Peer
+	name      string
+	sessionID string
+	// online=false 表示连接已断开、等待重连；offlineSince 记录掉线时间。
+	online       bool
+	offlineSince int64
 }
 
 type spectator struct {
@@ -41,6 +45,7 @@ const (
 	cmdSpectate
 	cmdInput
 	cmdLeave
+	cmdDisconnect
 )
 
 type command struct {
@@ -75,6 +80,9 @@ type Room struct {
 	participants map[string]*participant
 	spectators   []spectator
 	eventSeq     uint64
+	// onPlayerGone 在玩家被彻底移除（主动离开或重连超时）时回调，
+	// 由装配层用于清理会话；在 Run 之前设置，只在房间 goroutine 内调用。
+	onPlayerGone func(sessionID string)
 }
 
 // NewRoom 创建房间（不自动运行，调用方需 go room.Run()）。
@@ -91,6 +99,11 @@ func NewRoom(cfg *config.Config, codec protocol.Codec) *Room {
 	}
 }
 
+// SetOnPlayerGone 注册玩家彻底离开后的回调（用于清理会话），必须在 Run 之前调用。
+func (r *Room) SetOnPlayerGone(fn func(sessionID string)) {
+	r.onPlayerGone = fn
+}
+
 // Run 启动房间的固定步长循环，直到 Stop 被调用。
 func (r *Room) Run() {
 	defer close(r.done)
@@ -104,7 +117,9 @@ func (r *Room) Run() {
 		case cmd := <-r.cmds:
 			r.dispatch(cmd)
 		case <-ticker.C:
-			r.world.Step(time.Now().UnixMilli())
+			now := time.Now().UnixMilli()
+			r.expireDisconnected(now)
+			r.world.Step(now)
 			for _, ev := range r.world.DrainEvents() {
 				r.cast(ev.Type, ev.Data)
 			}
@@ -165,6 +180,12 @@ func (r *Room) Leave(playerID string) protocol.RoomInfo {
 	return rep.roomInfo
 }
 
+// Disconnect 通知房间某条连接已断开。战斗玩家会被标记为离线并保留实体，
+// 在 reconnectTimeoutMs 内重连可恢复；peer 用于忽略已失效连接的迟到通知。
+func (r *Room) Disconnect(playerID string, peer Peer) {
+	r.dispatchAsync(command{kind: cmdDisconnect, playerID: playerID, peer: peer})
+}
+
 // dispatchAsync 非阻塞投递命令；队列满时丢弃并记录（输入可丢，状态命令优先）。
 func (r *Room) dispatchAsync(cmd command) {
 	select {
@@ -199,6 +220,8 @@ func (r *Room) dispatch(cmd command) {
 		cmd.reply <- r.handleSpectate(cmd)
 	case cmdLeave:
 		cmd.reply <- r.handleLeave(cmd.playerID)
+	case cmdDisconnect:
+		r.handleDisconnect(cmd.playerID, cmd.peer)
 	case cmdInput:
 		r.handleInput(cmd)
 	}
@@ -209,8 +232,21 @@ func (r *Room) handleJoin(cmd command) reply {
 		return reply{result: protocol.JoinResult{Success: false, Reason: reason}, roomInfo: r.roomInfo()}
 	}
 
-	if _, exists := r.participants[cmd.playerID]; exists {
-		return fail("已在房间中")
+	if p, exists := r.participants[cmd.playerID]; exists {
+		if !r.world.HasPlayer(cmd.playerID) {
+			// 兜底：参与者记录还在但世界实体已丢失，重新生成。
+			r.spawnPlayer(cmd.playerID, cmd.sessionID, cmd.name, cmd.peer)
+			return reply{result: protocol.JoinResult{Success: true}, roomInfo: r.roomInfo()}
+		}
+		// 同一 playerID 再次加入视为重连：接管旧实体、位置与统计。
+		p.peer = cmd.peer
+		p.online = true
+		p.offlineSince = 0
+		if pp, ok := cmd.peer.(PromotePeer); ok {
+			pp.SetPlaying(true)
+		}
+		log.Printf("[room] 玩家重连: %s(%s)", p.name, cmd.playerID)
+		return reply{result: protocol.JoinResult{Success: true}, roomInfo: r.roomInfo()}
 	}
 	if r.isSpectator(cmd.playerID) {
 		return fail("已在观战队列中")
@@ -269,12 +305,12 @@ func (r *Room) handleInput(cmd command) {
 }
 
 func (r *Room) handleLeave(playerID string) reply {
-	if _, ok := r.participants[playerID]; ok {
-		name, _ := r.world.NameOf(playerID)
+	if p, ok := r.participants[playerID]; ok {
 		delete(r.participants, playerID)
 		r.world.RemovePlayer(playerID)
-		r.cast(protocol.S2CPlayerLeave, protocol.PlayerLeaveEvent{ID: playerID, Name: name})
-		log.Printf("[room] 玩家离开: %s(%s) %d/%d", name, playerID, len(r.participants), r.cfg.Room.MaxPlayers)
+		r.cast(protocol.S2CPlayerLeave, protocol.PlayerLeaveEvent{ID: playerID, Name: p.name})
+		log.Printf("[room] 玩家离开: %s(%s) %d/%d", p.name, playerID, len(r.participants), r.cfg.Room.MaxPlayers)
+		r.notifyPlayerGone(p.sessionID)
 		r.promoteSpectators()
 		r.notifySpectatorPositions()
 		return reply{roomInfo: r.roomInfo()}
@@ -284,11 +320,71 @@ func (r *Room) handleLeave(playerID string) reply {
 		if s.playerID == playerID {
 			r.spectators = append(r.spectators[:i], r.spectators[i+1:]...)
 			log.Printf("[room] 观战者离开: %s", s.name)
+			r.notifyPlayerGone(s.sessionID)
 			r.notifySpectatorPositions()
 			break
 		}
 	}
 	return reply{roomInfo: r.roomInfo()}
+}
+
+// handleDisconnect 处理连接断开：战斗玩家保留实体等待重连，观战者直接出队。
+func (r *Room) handleDisconnect(playerID string, peer Peer) {
+	if p, ok := r.participants[playerID]; ok {
+		// 只接受当前连接的通知，避免旧连接的迟到 close 把重连后的玩家标记为离线。
+		if p.peer != peer {
+			return
+		}
+		if p.online {
+			p.online = false
+			p.offlineSince = time.Now().UnixMilli()
+			log.Printf("[room] 玩家掉线，等待重连: %s(%s)", p.name, playerID)
+		}
+		return
+	}
+
+	for i, s := range r.spectators {
+		if s.playerID == playerID && s.peer == peer {
+			r.spectators = append(r.spectators[:i], r.spectators[i+1:]...)
+			log.Printf("[room] 观战者断线离开: %s", s.name)
+			r.notifyPlayerGone(s.sessionID)
+			r.notifySpectatorPositions()
+			return
+		}
+	}
+}
+
+// expireDisconnected 在重连超时后释放离线玩家的战斗位置。
+func (r *Room) expireDisconnected(now int64) {
+	timeout := int64(r.cfg.Room.ReconnectTimeoutMs)
+	if timeout <= 0 {
+		return
+	}
+
+	var expired []string
+	for id, p := range r.participants {
+		if !p.online && now-p.offlineSince >= timeout {
+			expired = append(expired, id)
+		}
+	}
+	for _, id := range expired {
+		p := r.participants[id]
+		delete(r.participants, id)
+		r.world.RemovePlayer(id)
+		r.cast(protocol.S2CPlayerLeave, protocol.PlayerLeaveEvent{ID: id, Name: p.name})
+		log.Printf("[room] 重连超时，释放位置: %s(%s)", p.name, id)
+		r.notifyPlayerGone(p.sessionID)
+	}
+	if len(expired) > 0 {
+		r.promoteSpectators()
+		r.notifySpectatorPositions()
+	}
+}
+
+func (r *Room) notifyPlayerGone(sessionID string) {
+	if r.onPlayerGone != nil && sessionID != "" {
+		r.onPlayerGone(sessionID)
+	}
 }
 
 // notifySpectatorPositions 在队列变化后，把最新排队序号推给仍在排队的观战者。
@@ -307,7 +403,12 @@ func (r *Room) spawnPlayer(playerID, sessionID, name string, peer Peer) {
 	p := r.world.AddPlayer(playerID, sessionID, name)
 	// 出生保护：与 P1 一致，入场后短暂无敌。
 	p.InvincibleUntil = time.Now().UnixMilli() + int64(r.cfg.Player.InvincibleAfterRespawnMs)
-	r.participants[playerID] = &participant{peer: peer, name: name}
+	r.participants[playerID] = &participant{
+		peer:      peer,
+		name:      name,
+		sessionID: sessionID,
+		online:    true,
+	}
 	r.cast(protocol.S2CPlayerJoin, protocol.PlayerJoinEvent{ID: playerID, Name: name})
 }
 
@@ -361,7 +462,9 @@ func (r *Room) broadcastSnapshot() {
 	}
 
 	for _, p := range r.participants {
-		p.peer.Send(raw)
+		if p.online {
+			p.peer.Send(raw)
+		}
 	}
 	for _, s := range r.spectators {
 		s.peer.Send(raw)
@@ -377,7 +480,9 @@ func (r *Room) cast(msgType string, data any) {
 		return
 	}
 	for _, p := range r.participants {
-		p.peer.Send(raw)
+		if p.online {
+			p.peer.Send(raw)
+		}
 	}
 	for _, s := range r.spectators {
 		s.peer.Send(raw)

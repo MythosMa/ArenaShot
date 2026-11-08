@@ -40,10 +40,10 @@ type Player struct {
 	Deaths    int
 
 	// 战斗运行时状态（毫秒时间戳 / 剩余毫秒）
-	FireCdRemainMs   float64 // 距下一次开火还需经过的毫秒
-	InvincibleUntil  int64   // 无敌截止时间（出生/复活后短暂无敌）
-	PowerUntil       int64   // 威力 buff 截止时间
-	SpeedUntil       int64   // 加速 buff 截止时间
+	FireCdRemainMs  float64 // 距下一次开火还需经过的毫秒
+	InvincibleUntil int64   // 无敌截止时间（出生/复活后短暂无敌）
+	PowerUntil      int64   // 威力 buff 截止时间
+	SpeedUntil      int64   // 加速 buff 截止时间
 
 	// 运行时输入状态
 	input        protocol.InputRequest
@@ -66,18 +66,19 @@ func (p *Player) Snapshot(nowMs int64) protocol.PlayerSnapshot {
 		buffs["invincible"] = p.InvincibleUntil
 	}
 	return protocol.PlayerSnapshot{
-		ID:        p.ID,
-		Name:      p.Name,
-		X:         p.X,
-		Y:         p.Y,
-		Aim:       p.Aim,
-		Hp:        p.HP,
-		MaxHp:     p.MaxHP,
-		Alive:     p.Alive,
-		RespawnAt: p.RespawnAt,
-		Buffs:     buffs,
-		Kills:     p.Kills,
-		Deaths:    p.Deaths,
+		ID:               p.ID,
+		Name:             p.Name,
+		X:                p.X,
+		Y:                p.Y,
+		Aim:              p.Aim,
+		Hp:               p.HP,
+		MaxHp:            p.MaxHP,
+		Alive:            p.Alive,
+		RespawnAt:        p.RespawnAt,
+		Buffs:            buffs,
+		Kills:            p.Kills,
+		Deaths:           p.Deaths,
+		LastProcessedSeq: p.lastInputSeq,
 	}
 }
 
@@ -107,7 +108,7 @@ type WorldEvent struct {
 // obstacle 是地图上的静态障碍，可能为可破坏类型。
 type obstacle struct {
 	ID        string
-	Type      string // solid | breakable
+	Type      string  // solid | breakable
 	X, Y      float64 // 中心点
 	W, H      float64
 	HP        int
@@ -117,19 +118,18 @@ type obstacle struct {
 
 // World 是房间内的全部权威状态。
 type World struct {
-	cfg      *config.Config
-	tick     uint64
-	nowMs    int64
-	players  map[string]*Player
+	cfg       *config.Config
+	tick      uint64
+	nowMs     int64
+	players   map[string]*Player
 	obstacles []*obstacle
-	bullets  []*bullet
-	items    []*item
-	events   []WorldEvent
+	bullets   []*bullet
+	items     []*item
+	events    []WorldEvent
 
 	itemSpawnAccum int64
 	bulletSeq      uint64
 	itemSeq        uint64
-	processedInputs uint64
 }
 
 // NewWorld 依据配置初始化世界与静态障碍。
@@ -225,7 +225,6 @@ func (w *World) SetInput(id string, seq uint64, in protocol.InputRequest, nowMs 
 	p.input = in
 	p.lastInputAt = nowMs
 	p.lastInputSeq = seq
-	w.processedInputs++
 	return true
 }
 
@@ -345,14 +344,13 @@ func (w *World) Snapshot() protocol.Snapshot {
 	}
 
 	return protocol.Snapshot{
-		Tick:             w.tick,
-		ServerTime:       w.nowMs,
-		LastProcessedSeq: w.processedInputs,
-		Players:          players,
-		Bullets:          bullets,
-		Obstacles:        obstacles,
-		Items:            items,
-		Leaderboard:      leaderboard,
+		Tick:        w.tick,
+		ServerTime:  w.nowMs,
+		Players:     players,
+		Bullets:     bullets,
+		Obstacles:   obstacles,
+		Items:       items,
+		Leaderboard: leaderboard,
 	}
 }
 
@@ -443,7 +441,7 @@ func (w *World) bulletHit(b *bullet, nx, ny float64) *Player {
 		if p.ID == b.Owner || !p.Alive {
 			continue
 		}
-		if math.Hypot(p.X-nx, p.Y-ny) < w.cfg.Player.Radius + b.Radius {
+		if math.Hypot(p.X-nx, p.Y-ny) < w.cfg.Player.Radius+b.Radius {
 			return p
 		}
 	}

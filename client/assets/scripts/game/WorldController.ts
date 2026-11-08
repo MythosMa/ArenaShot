@@ -19,7 +19,7 @@ import {
     ErrorMessage, HitEvent, ItemPickedEvent, JoinResult, KillEvent, ObstacleBrokenEvent,
     PlayerJoinEvent, PlayerLeaveEvent, S2C, Snapshot,
 } from '../net/NetTypes';
-import { NetClient } from '../net/NetClient';
+import { NetClient, NetState, defaultWsUrl } from '../net/NetClient';
 import { GameContext } from './GameContext';
 import { Coord } from './Coord';
 import { GameState } from './GameState';
@@ -64,6 +64,14 @@ export class WorldController extends Component {
     private netMode = false;
     /** 输入上报节流累计时间（毫秒）。 */
     private _inputAccumMs = 0;
+
+    // ---- P4 断线重连 ----
+    /** 正在执行自动重连，避免并发触发多套流程。 */
+    private _reconnecting = false;
+    /** 组件已销毁（切场景），停止重连循环。 */
+    private _destroyed = false;
+    /** 每次重连尝试间隔（毫秒），服务端 reconnectTimeoutMs 内重连可保留位置。 */
+    private static readonly RECONNECT_INTERVAL_MS = 2000;
 
     async onLoad(): Promise<void> {
         // 1. 配置与坐标系就绪
@@ -139,9 +147,14 @@ export class WorldController extends Component {
     }
 
     protected onDestroy(): void {
+        this._destroyed = true;
         this.inputCtrl?.dispose();
         this.viewMgr?.clearAll();
         this._unbindNetHandlers();
+        // 离开战斗场景即结束本次对局；重连循环也会因为 _destroyed 退出。
+        if (this.netMode) {
+            NetClient.instance.close();
+        }
     }
 
     // ---------------- P2 网络模式 ----------------
@@ -168,7 +181,8 @@ export class WorldController extends Component {
 
     private readonly _onNetSnapshot = (snap: Snapshot): void => {
         this.state.updateFromSnapshot(snap);
-        this.viewMgr.sync(snap);
+        // 网络快照 20Hz 到达，视图层做插值平滑到 60fps。
+        this.viewMgr.sync(snap, true);
         // 无敌状态由服务端以 buff 形式下发（出生/复活后短暂无敌）。
         for (const p of snap.players) {
             this.viewMgr.findPlayer(p.id)?.setInvincible((p.buffs?.invincible ?? 0) > snap.serverTime);
@@ -223,9 +237,11 @@ export class WorldController extends Component {
         net.on(S2C.Error, this._onNetError);
         net.on(S2C.PlayerJoin, this._onNetPlayerJoin);
         net.on(S2C.PlayerLeave, this._onNetPlayerLeave);
+        EventBus.instance.on<NetState>(Events.NetStateChanged, this._onNetState, this);
     }
 
     private _unbindNetHandlers(): void {
+        EventBus.instance.offTarget(this);
         const net = this.netClient;
         if (!net) return;
         net.off(S2C.JoinResult, this._onNetJoinResult);
@@ -237,6 +253,57 @@ export class WorldController extends Component {
         net.off(S2C.Error, this._onNetError);
         net.off(S2C.PlayerJoin, this._onNetPlayerJoin);
         net.off(S2C.PlayerLeave, this._onNetPlayerLeave);
+    }
+
+    // ---------------- P4 断线重连 ----------------
+
+    /** 战斗中断线（state='closed'）时启动自动重连；主动 close 走 'idle'，不会触发。 */
+    private _onNetState(state: NetState): void {
+        if (!this.netMode || this._destroyed) return;
+        if (state === 'closed') {
+            void this._startReconnect();
+        }
+    }
+
+    /**
+     * 重连流程：连接 -> 带 sessionId 登录（复用原身份/位置）-> 加入 -> 恢复心跳。
+     * 若超过服务端 reconnectTimeoutMs 仍未成功，登录会拿到新会话并重新进入对局。
+     */
+    private async _startReconnect(): Promise<void> {
+        if (this._reconnecting || this._destroyed) return;
+        this._reconnecting = true;
+        GameContext.reconnecting = true;
+        console.warn('[战斗] 连接断开，开始自动重连');
+
+        while (!this._destroyed) {
+            try {
+                const net = this.netClient ?? NetClient.instance;
+                const url = GameContext.serverUrl || defaultWsUrl();
+                await net.connect(url);
+                const login = await net.login(GameContext.playerName, GameContext.sessionId);
+                GameContext.myPlayerId = login.playerId;
+                GameContext.sessionId = login.sessionId;
+
+                const res = await net.join();
+                GameContext.queuePos = res.spectator ? res.queuePos : 0;
+                net.startPing();
+
+                GameContext.reconnecting = false;
+                this._reconnecting = false;
+                console.info('[战斗] 重连成功:', login.playerId);
+                return;
+            } catch (err) {
+                console.warn('[战斗] 重连失败，稍后重试:', (err as Error).message);
+                // 半开连接无法复用，清理后等下一轮再试。
+                NetClient.instance.close();
+            }
+            await this._delay(WorldController.RECONNECT_INTERVAL_MS);
+        }
+        this._reconnecting = false;
+    }
+
+    private _delay(ms: number): Promise<void> {
+        return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
     // ---------------- 事件表现 ----------------

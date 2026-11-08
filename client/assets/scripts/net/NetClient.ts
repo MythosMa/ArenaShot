@@ -30,6 +30,9 @@ import {
 
 export type NetState = 'idle' | 'connecting' | 'open' | 'closed';
 
+/** 连续多久没有收到 pong 就判定连接失效（毫秒）。 */
+const PONG_TIMEOUT_MS = 6000;
+
 type MessageHandler = (data: any) => void;
 
 interface PendingRequest {
@@ -71,6 +74,8 @@ export class NetClient {
     private _pending: PendingRequest | null = null;
     private _pingTimer: ReturnType<typeof setInterval> | null = null;
     private _rtt = 0;
+    /** 最近一次收到 pong 的时间，用于心跳看门狗判定连接是否已死。 */
+    private _lastPongAt = 0;
 
     get state(): NetState {
         return this._state;
@@ -151,6 +156,8 @@ export class NetClient {
     close(): void {
         this._stopPing();
         this._rejectPending('连接已关闭');
+        this._rtt = 0;
+        this._lastPongAt = 0;
 
         const ws = this._ws;
         this._ws = null;
@@ -234,13 +241,50 @@ export class NetClient {
     /** 开始心跳与 RTT 采样。 */
     startPing(intervalMs = 2000): void {
         this._stopPing();
+        this._lastPongAt = Date.now();
         this._ping();
         this._pingTimer = setInterval(() => this._ping(), intervalMs);
     }
 
     private _ping(): void {
+        // 浏览器离线/弱网时，已建立的 WebSocket 可能既不报错也不触发 onclose，
+        // 消息只是被缓存，恢复后一起涌出。这里用 pong 超时主动判定连接已死。
+        if (this._lastPongAt > 0 && Date.now() - this._lastPongAt > PONG_TIMEOUT_MS) {
+            // 后台标签页的定时器会被节流，不能据此判定掉线；恢复前台后再检测。
+            if (typeof document !== 'undefined' && document.hidden) {
+                this._lastPongAt = Date.now();
+            } else {
+                this._dropConnection('心跳超时');
+                return;
+            }
+        }
         const req: PingRequest = { clientTime: Date.now() };
         this.send(C2S.Ping, req);
+    }
+
+    /**
+     * 连接被判定失效（心跳超时）：主动断开并以 'closed' 通知上层触发重连。
+     * 与 close() 的区别是后者表示「主动关闭」，状态为 idle，不会触发重连。
+     */
+    private _dropConnection(reason: string): void {
+        const ws = this._ws;
+        this._ws = null;
+        this._stopPing();
+        this._rejectPending(reason);
+        if (ws) {
+            ws.onopen = null;
+            ws.onerror = null;
+            ws.onclose = null;
+            ws.onmessage = null;
+            try {
+                ws.close();
+            } catch (e) {
+                void e;
+            }
+        }
+        this._rtt = 0;
+        this._lastPongAt = 0;
+        this._setState('closed');
     }
 
     private _stopPing(): void {
@@ -332,9 +376,16 @@ export class NetClient {
     private _onPong(pong: PongResponse): void {
         const clientTime = Number(pong?.clientTime ?? 0);
         if (clientTime <= 0) return;
+        this._lastPongAt = Date.now();
 
         const sample = Math.max(0, Date.now() - clientTime);
-        this._rtt = this._rtt > 0 ? this._rtt * 0.7 + sample * 0.3 : sample;
+        // 正常抖动做指数平滑；断网恢复这类大幅跳变直接采用新值，
+        // 否则几千毫秒的陈旧样本会让显示值缓慢回退。
+        if (this._rtt === 0 || Math.abs(sample - this._rtt) > 500) {
+            this._rtt = sample;
+        } else {
+            this._rtt = this._rtt * 0.7 + sample * 0.3;
+        }
         this.onRtt?.(this.rtt);
         // 同时广播到事件总线，供 UI 组件订阅。
         EventBus.instance.emit(Events.RttUpdated, this.rtt);
@@ -344,5 +395,7 @@ export class NetClient {
         if (this._state === state) return;
         this._state = state;
         this.onState?.(state);
+        // 广播到事件总线，供战斗场景的断线/重连逻辑与 UI 订阅。
+        EventBus.instance.emit(Events.NetStateChanged, state);
     }
 }

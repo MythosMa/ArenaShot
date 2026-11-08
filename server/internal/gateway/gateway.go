@@ -184,8 +184,14 @@ func (c *Client) shutdown() {
 		close(c.done)
 
 		sess, joined := c.identity()
-		if sess != nil && joined {
-			c.g.room.Leave(sess.PlayerID)
+		if sess != nil {
+			if joined {
+				// 战斗/观战中掉线：保留战斗实体，等待重连超时后再释放。
+				c.g.room.Disconnect(sess.PlayerID, c)
+			} else {
+				// 只是登录过就断开，直接回收会话，避免会话泄漏。
+				c.g.sessions.Delete(sess.ID)
+			}
 		}
 		_ = c.conn.Close()
 	})
@@ -228,7 +234,18 @@ func (c *Client) handleLogin(env *protocol.Envelope) {
 		return
 	}
 
-	sess := c.g.sessions.Create(name)
+	// 带 sessionId 且会话仍有效时复用原身份，实现断线重连。
+	var sess *session.Session
+	reconnected := false
+	if req.SessionID != "" {
+		if s, ok := c.g.sessions.Get(req.SessionID); ok {
+			sess = s
+			reconnected = true
+		}
+	}
+	if sess == nil {
+		sess = c.g.sessions.Create(name)
+	}
 	c.setIdentity(sess)
 
 	c.sendMsg(protocol.S2CLoginOK, protocol.LoginResponse{
@@ -237,7 +254,11 @@ func (c *Client) handleLogin(env *protocol.Envelope) {
 		ConfigVersion: c.g.cfg.Version,
 		ServerTime:    time.Now().UnixMilli(),
 	})
-	log.Printf("[gateway] 登录成功: %s(%s)", name, sess.PlayerID)
+	if reconnected {
+		log.Printf("[gateway] 重连登录: %s(%s)", sess.Name, sess.PlayerID)
+	} else {
+		log.Printf("[gateway] 登录成功: %s(%s)", name, sess.PlayerID)
+	}
 }
 
 func (c *Client) handleJoin(env *protocol.Envelope) {

@@ -110,6 +110,8 @@ export interface PlayerSnapshot {
     buffs: Record<string, number>;
     kills: number;
     deaths: number;
+    /** 服务端已接受的本玩家最后一个输入序号，用于预测校正 */
+    lastProcessedSeq: number;
 }
 
 export interface BulletSnapshot {
@@ -148,8 +150,6 @@ export interface LeaderboardEntry {
 export interface Snapshot {
     tick: number;
     serverTime: number;
-    /** 服务器已处理的最后一个输入序号，用于客户端预测校正 */
-    lastProcessedSeq: number;
     players: PlayerSnapshot[];
     bullets: BulletSnapshot[];
     obstacles: ObstacleSnapshot[];

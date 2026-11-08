@@ -6,6 +6,7 @@ import { _decorator, Component, Label, Tween, tween, UIOpacity } from 'cc';
 import { EventBus, Events } from '../core/EventBus';
 import { GameContext } from '../game/GameContext';
 import { ItemPickedEvent, JoinResult } from '../net/NetTypes';
+import { NetState } from '../net/NetClient';
 
 const { ccclass, property } = _decorator;
 
@@ -29,6 +30,7 @@ export class ToastController extends Component {
         EventBus.instance.on<ItemPickedEvent>(Events.ItemPicked, this._onItem, this);
         EventBus.instance.on<unknown>(Events.ErrorToast, this._onError, this);
         EventBus.instance.on<JoinResult>(Events.JoinResult, this._onJoinResult, this);
+        EventBus.instance.on<NetState>(Events.NetStateChanged, this._onNetState, this);
 
         // 入场即观战（满员排队）：进入战斗场景后明确提示，避免“不能动”的困惑。
         if (GameContext.queuePos > 0) {
@@ -48,6 +50,17 @@ export class ToastController extends Component {
     private _onError(payload: unknown): void {
         const text = typeof payload === 'string' ? payload : '发生错误';
         this.show(text);
+    }
+
+    /** 断线/重连状态提示。主动 close 走 idle，不提示。 */
+    private _onNetState(state: NetState): void {
+        if (state === 'closed') {
+            this.show('网络断开，正在重连...');
+        } else if (state === 'connecting' && GameContext.reconnecting) {
+            this.show('重连中...');
+        } else if (state === 'open' && GameContext.reconnecting) {
+            this.show('网络已恢复');
+        }
     }
 
     /** 入房后的再次加入结果：观战者被补位 / 补位后有空位就进战斗。 */
