@@ -1,0 +1,29 @@
+# ArenaShot 游戏服务 systemd 单元示例。
+# 放置到 /etc/systemd/system/arenashot.service 后：
+#   sudo systemctl daemon-reload && sudo systemctl enable --now arenashot
+
+[Unit]
+Description=ArenaShot Game Server (Go)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 部署目录：源码与二进制放 /opt/arenashot，静态站点放 /var/www/arenashot
+WorkingDirectory=/opt/arenashot
+ExecStart=/opt/arenashot/bin/server -config config/game.json -addr 127.0.0.1:8080
+# 只监听本机回环地址，由 Nginx 对外提供 HTTP/WSS 入口
+# 服务端只处理 SIGINT/SIGTERM（优雅退出），不提供 SIGHUP 重载，改配置需 restart
+Restart=on-failure
+RestartSec=3
+# 头部空间用于 20Hz 全量快照 + 4 人，罗列初始值便于排查
+LimitNOFILE=65536
+
+# 加固（可选）
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

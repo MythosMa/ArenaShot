@@ -42,11 +42,19 @@ interface PendingRequest {
     timer: ReturnType<typeof setTimeout>;
 }
 
-/** 默认服务端地址：开发时指向本机 8080，部署时可通过 GameContext.serverUrl 覆盖。 */
+/**
+ * 默认服务端地址。
+ *
+ * - 开发预览（http）：直连本机 8080，Cocos 预览服务器与游戏服不同端口。
+ * - 生产部署（https）：与页面同源 /ws，由 Nginx 反向代理到 Go 服务，走 WSS。
+ * - 其他情况可通过 GameContext.serverUrl 覆盖。
+ */
 export function defaultWsUrl(): string {
     if (typeof location !== 'undefined' && location.hostname) {
-        const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-        return `${proto}://${location.hostname}:8080/ws`;
+        if (location.protocol === 'https:') {
+            return `wss://${location.hostname}/ws`;
+        }
+        return `ws://${location.hostname}:8080/ws`;
     }
     return 'ws://127.0.0.1:8080/ws';
 }

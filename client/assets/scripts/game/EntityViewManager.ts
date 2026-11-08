@@ -185,6 +185,8 @@ export class EntityViewManager {
                 }
                 fresh.node.active = true;
                 fresh.view.apply(b, 0); // 初次出现直接落位
+                // 新子弹出现即代表一次开火，驱动对应玩家的后坐动效。
+                this._players.get(b.owner)?.playFire();
                 this._bulletsById.set(b.id, fresh);
             }
         }

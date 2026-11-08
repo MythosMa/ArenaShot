@@ -13,6 +13,7 @@ import {
     Camera, director, instantiate, Prefab, _decorator, Component, Node,
 } from 'cc';
 import { ObjectPool } from '../core/ObjectPool';
+import { createLogger } from '../core/Logger';
 import { loadConfig, getConfig, MapConfigData, GameConfigData } from '../config/GameConfig';
 import { Events, EventBus } from '../core/EventBus';
 import {
@@ -29,6 +30,9 @@ import { LocalMockDriver } from './LocalMockDriver';
 import { DamageTextView } from './view/DamageTextView';
 
 const { ccclass, property } = _decorator;
+
+// 战斗流程日志：Info 在 DEBUG 构建打印，生产构建（web-mobile 发布）静默。
+const log = createLogger('战斗');
 
 @ccclass('WorldController')
 export class WorldController extends Component {
@@ -214,11 +218,11 @@ export class WorldController extends Component {
     };
 
     private readonly _onNetPlayerJoin = (ev: PlayerJoinEvent): void => {
-        console.info(`[战斗] ${ev.name}(${ev.id}) 进入房间`);
+        log.i(`${ev.name}(${ev.id}) 进入房间`);
     };
 
     private readonly _onNetPlayerLeave = (ev: PlayerLeaveEvent): void => {
-        console.info(`[战斗] ${ev.name}(${ev.id}) 离开房间`);
+        log.i(`${ev.name}(${ev.id}) 离开房间`);
     };
 
     /** 入房后再次收到加入结果：一般是观战者被补位为战斗玩家。 */
@@ -290,7 +294,7 @@ export class WorldController extends Component {
 
                 GameContext.reconnecting = false;
                 this._reconnecting = false;
-                console.info('[战斗] 重连成功:', login.playerId);
+                log.i('重连成功:', login.playerId);
                 return;
             } catch (err) {
                 console.warn('[战斗] 重连失败，稍后重试:', (err as Error).message);
@@ -333,7 +337,7 @@ export class WorldController extends Component {
                 }
                 case 'log': {
                     // P1 直接把局内日志打到控制台
-                    console.info('[战斗]', ev.payload);
+                    log.i(ev.payload);
                     break;
                 }
             }
