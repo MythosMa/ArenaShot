@@ -4,7 +4,16 @@
  * 只做「表现」，不持有任何服务器权威状态；数据全部来自快照。
  */
 
-import { _decorator, Color, Component, Graphics, Label, Node } from "cc";
+import {
+  _decorator,
+  Color,
+  Component,
+  Graphics,
+  Label,
+  Node,
+  UIOpacity,
+  UITransform,
+} from "cc";
 import { getConfig } from "../../config/GameConfig";
 import { PlayerSnapshot } from "../../net/NetTypes";
 import { Coord } from "../Coord";
@@ -71,6 +80,24 @@ export class PlayerView extends Component {
   /** 无敌光圈是否已绘制（Graphics 只在运行时生成顶点）。 */
   private _invincibleDrawn = false;
 
+  // ---- buff 特效（运行时创建的光环节点，画在身体下层）----
+  private _buffNode: Node | null = null;
+  private _buffGfx: Graphics | null = null;
+  private _buffOpacity: UIOpacity | null = null;
+  /** 位掩码：bit0 = 移速，bit1 = 威力。 */
+  private _buffMask = 0;
+  /** 刚获得 buff 时的弹出脉冲 0~1。 */
+  private _buffPulse = 0;
+  /** 上次快照时间 + 本地累计，用于平滑倒计时与到期闪烁。 */
+  private _buffServerTime = 0;
+  private _buffLocalMs = 0;
+  private _speedUntil = 0;
+  private _powerUntil = 0;
+
+  /** 受击推挤方向（节点空间，指向命中点）。 */
+  private _hitDirX = 0;
+  private _hitDirY = 0;
+
   /** 由 EntityViewManager 在创建视图时调用一次。 */
   init(data: PlayerSnapshot, isLocal: boolean, radius: number): void {
     this._radius = radius;
@@ -96,6 +123,10 @@ export class PlayerView extends Component {
     this._animT = 0;
     this._speed = 0;
     this._hasLastN = false;
+
+    // buff 光环节点（运行时创建，放在身体下层）。
+    this._buffMask = 0;
+    this._createBuffFx();
   }
 
   /**
@@ -127,6 +158,10 @@ export class PlayerView extends Component {
     }
     this._wasAlive = snap.alive;
     this.node.active = snap.alive;
+    // 节点整体隐藏时子节点也跟着隐藏；复活时按当前 buff 掩码恢复。
+    if (this._buffNode) {
+      this._buffNode.active = snap.alive && this._buffMask !== 0;
+    }
 
     // 复活或首次出现：重置速度采样（避免把瞬移当成高速移动），并播放弹出动画。
     if (snap.alive && (!wasAlive || !this._hasLastN)) {
@@ -140,10 +175,21 @@ export class PlayerView extends Component {
     this._updateHp(snap.hp, snap.maxHp);
   }
 
-  /** 命中表现：身体短暂闪白并出现一次顿挫脉冲。 */
-  playHitFlash(): void {
+  /** 命中表现：身体闪白 + 顿挫 + 沿命中方向推开一点。hitX/hitY 是服务器坐标的命中点。 */
+  playHitFlash(hitX?: number, hitY?: number): void {
     this._flashT = 0.08;
     this._hitPulse = 1;
+    if (hitX !== undefined && hitY !== undefined) {
+      // 命中方向（节点空间，y 向上=服务器 y 减）。夹紧成单位向量。
+      const dx = hitX - this._curX;
+      const dy = this._curY - hitY;
+      const len = Math.sqrt(dx * dx + dy * dy) || 1;
+      this._hitDirX = dx / len;
+      this._hitDirY = dy / len;
+    } else {
+      this._hitDirX = 0;
+      this._hitDirY = 0;
+    }
     this._redrawBody();
   }
 
@@ -164,6 +210,39 @@ export class PlayerView extends Component {
       this._redrawInvincible();
     }
     this.invincibleNode.active = show;
+  }
+
+  /**
+   * 应用快照里的 buff 状态（到期时间是服务端时间戳）。
+   * 由 WorldController 每帧快照调用；掩码变化时才重绘光环。
+   */
+  setBuffs(buffs: Record<string, number> | undefined, serverTime: number): void {
+    this._speedUntil = buffs?.['speed'] ?? 0;
+    this._powerUntil = buffs?.['power'] ?? 0;
+
+    // 用「快照服务端时间 + 本地流逝」逼近当前时间，平滑倒数与到期闪烁。
+    this._buffServerTime = serverTime;
+    this._buffLocalMs = 0;
+
+    const mask =
+      (this._speedUntil > serverTime ? 1 : 0) |
+      (this._powerUntil > serverTime ? 2 : 0);
+    if (mask !== this._buffMask) {
+      const gained = mask !== 0 && this._buffMask === 0;
+      this._buffMask = mask;
+      this._redrawBuffFx();
+      if (this._buffNode) {
+        this._buffNode.active = this.node.active && mask !== 0;
+      }
+      if (gained) {
+        this._buffPulse = 1; // 刚获得 buff：光圈弹一下吸引注意
+      }
+    }
+  }
+
+  /** 当前渲染的服务器坐标，用于击杀反馈在被害者脚下定位。 */
+  getServerPos(): { x: number; y: number } {
+    return { x: this._curX, y: this._curY };
   }
 
   destroyView(): void {
@@ -248,12 +327,13 @@ export class PlayerView extends Component {
       body.angle = this._moveAngleDeg;
       body.setScale(k * (1 + stretch), k * (1 - stretch * 0.8), 1);
 
-      // 移动弹跳 + 开火后坐（沿朝向反方向轻推身体）。
+      // 移动弹跳 + 开火后坐（沿朝向反方向轻推身体）+ 受击沿命中方向推挤。
       const bob = moveK * Math.abs(Math.sin(this._walkPhase)) * 1.8;
       const recoil = 2.2 * this._firePulse;
+      const hitKick = 3.5 * this._hitPulse;
       body.setPosition(
-        -Math.cos(this._toAim) * recoil,
-        bob + Math.sin(this._toAim) * recoil,
+        -Math.cos(this._toAim) * recoil - this._hitDirX * hitKick,
+        bob + Math.sin(this._toAim) * recoil - this._hitDirY * hitKick,
         0,
       );
     }
@@ -269,6 +349,9 @@ export class PlayerView extends Component {
       const rs = 1 + 0.07 * Math.sin(this._animT * 7);
       this.invincibleNode.setScale(rs, rs, 1);
     }
+
+    // 6. buff 光环动画。
+    this._updateBuffFx(dt);
   }
 
   /** easeOutBack：出生时从 0 轻微过冲再回到 1，有「蹦出来」的感觉。 */
@@ -365,5 +448,93 @@ export class PlayerView extends Component {
     g.circle(0, 0, r - 4);
     g.stroke();
     this._invincibleDrawn = true;
+  }
+
+  // ---------------- buff 光环 ----------------
+
+  /** 运行时创建 buff 光环节点：纯 Graphics，画在身体下层。 */
+  private _createBuffFx(): void {
+    if (this._buffNode) return;
+    const node = new Node('buffFx');
+    node.layer = this.node.layer;
+    node.addComponent(UITransform);
+    node.parent = this.node;
+    node.setSiblingIndex(0); // 盖在身体、血条等下层
+    const gfx = node.addComponent(Graphics);
+    const opacity = node.addComponent(UIOpacity);
+    this._buffNode = node;
+    this._buffGfx = gfx;
+    this._buffOpacity = opacity;
+    node.active = false; // 无 buff 时隐藏，交给 setBuffs/apply 控制
+  }
+
+  /** buff 光环每帧动效：微脉动、新获得时弹出、持续旋转、快到期时闪烁。 */
+  private _updateBuffFx(dt: number): void {
+    this._buffLocalMs += dt * 1000;
+    const buf = this._buffNode;
+    if (!buf || !buf.active) return;
+
+    // 到期时间 = 快照服务端时间 + 本地流逝，用于倒数与闪烁判断。
+    const now = this._buffServerTime + this._buffLocalMs;
+    const leftMs = Math.max(this._speedUntil - now, this._powerUntil - now);
+
+    this._buffPulse = Math.max(0, this._buffPulse - dt / 0.4);
+
+    const s = 1 + 0.06 * Math.sin(this._animT * 6) + 0.12 * this._buffPulse;
+    buf.setScale(s, s, 1);
+    buf.angle += dt * 90; // 旋转让弧线/尖刺产生「流淌感」
+
+    const opacity = this._buffOpacity!;
+    if (leftMs < 1500 && leftMs >= 0) {
+      // 快到期：150ms 周期闪烁提醒。
+      opacity.opacity = Math.floor(this._animT * 6.67) % 2 === 0 ? 90 : 255;
+    } else {
+      opacity.opacity = 255;
+    }
+  }
+
+  /** 按当前掩码重绘光环图形（掩码变化才调用）。 */
+  private _redrawBuffFx(): void {
+    const g = this._buffGfx;
+    if (!g) return;
+    g.clear();
+
+    if (this._buffMask & 1) {
+      // 移速：三道蓝色同心弧，像气流一样。
+      const arcs = [
+        { color: new Color(90, 175, 255, 235), line: 3, r: this._radius + 7 },
+        { color: new Color(120, 195, 255, 190), line: 2, r: this._radius + 11 },
+        { color: new Color(150, 215, 255, 140), line: 1.5, r: this._radius + 15 },
+      ];
+      for (const a of arcs) {
+        g.strokeColor = a.color;
+        g.lineWidth = a.line;
+        g.arc(0, 0, a.r, -Math.PI * 0.9, Math.PI * 0.9, false);
+        g.stroke();
+      }
+    }
+
+    if (this._buffMask & 2) {
+      // 威力：橙色外环 + 四根向外尖刺，旋转时像齿轮。
+      const r = this._radius + 10;
+      g.strokeColor = new Color(255, 130, 60, 235);
+      g.lineWidth = 2.5;
+      g.circle(0, 0, r);
+      g.stroke();
+      g.fillColor = new Color(255, 130, 60, 235);
+      for (let i = 0; i < 4; i++) {
+        const a = Math.PI / 4 + (i * Math.PI) / 2;
+        const px = -Math.sin(a) * 3; // 垂直方向半宽
+        const py = Math.cos(a) * 3;
+        const tipX = Math.cos(a) * (r + 4);
+        const tipY = Math.sin(a) * (r + 4);
+        g.moveTo(Math.cos(a) * (r - 1.5) + px, Math.sin(a) * (r - 1.5) + py);
+        g.lineTo(tipX + px, tipY + py);
+        g.lineTo(tipX - px, tipY - py);
+        g.lineTo(Math.cos(a) * (r - 1.5) - px, Math.sin(a) * (r - 1.5) - py);
+        g.close();
+        g.fill();
+      }
+    }
   }
 }

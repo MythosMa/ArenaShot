@@ -54,9 +54,9 @@ export class EntityViewManager {
         return { node, view: node.getComponent(ItemView)! };
     });
 
-    /** 当前正在显示的子弹/道具。子弹按 ID 复用节点以便插值。 */
+    /** 当前正在显示的子弹/道具，按 ID 复用节点（子弹插值、道具动效都需要稳定身份）。 */
     private readonly _bulletsById = new Map<string, PooledNode<BulletView>>();
-    private _activeItems: PooledNode<ItemView>[] = [];
+    private readonly _itemsById = new Map<string, PooledNode<ItemView>>();
 
     /** 上一次快照到达时间，用于估算快照间隔（插值时长）。 */
     private _lastSyncMs = 0;
@@ -126,7 +126,11 @@ export class EntityViewManager {
             this._bulletPool.put(item);
         }
         this._bulletsById.clear();
-        this._itemsToPool();
+        for (const item of this._itemsById.values()) {
+            item.node.active = false;
+            this._itemPool.put(item);
+        }
+        this._itemsById.clear();
         this._bulletPool.clear();
         this._itemPool.clear();
     }
@@ -199,25 +203,32 @@ export class EntityViewManager {
         }
     }
 
+    /**
+     * 道具按 ID 复用节点：同一道具跨快照保持同一个节点，
+     * 悬浮/弹出动画才不会每 50ms 被重置一次；消失时归还池。
+     */
     private _syncItems(list: ItemSnapshot[]): void {
-        this._itemsToPool();
+        const alive = new Set<string>();
         for (const it of list) {
-            const item = this._itemPool.get();
-            if (item.node.parent !== this.roots.itemsRoot) {
-                item.node.parent = this.roots.itemsRoot;
+            alive.add(it.id);
+            let item = this._itemsById.get(it.id);
+            if (!item) {
+                item = this._itemPool.get();
+                if (item.node.parent !== this.roots.itemsRoot) {
+                    item.node.parent = this.roots.itemsRoot;
+                }
+                item.view.init(it.type);
+                this._itemsById.set(it.id, item);
             }
-            item.view.init(it.type);
             item.node.setPosition(this.toNode(it.x, it.y));
-            this._activeItems.push(item);
         }
-    }
-
-    private _itemsToPool(): void {
-        for (const item of this._activeItems) {
-            item.node.active = false;
-            this._itemPool.put(item);
+        for (const [id, item] of this._itemsById) {
+            if (!alive.has(id)) {
+                item.node.active = false;
+                this._itemPool.put(item);
+                this._itemsById.delete(id);
+            }
         }
-        this._activeItems = [];
     }
 
     /** 服务器空间 -> 节点空间坐标（原点在地图中心，y 向上）。 */

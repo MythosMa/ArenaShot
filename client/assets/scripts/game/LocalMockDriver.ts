@@ -437,6 +437,7 @@ export class LocalMockDriver {
         const buffs: Record<string, number> = {};
         if (p.powerUntil > this._now) buffs['power'] = p.powerUntil;
         if (p.speedUntil > this._now) buffs['speed'] = p.speedUntil;
+        if (p.invincibleUntil > this._now) buffs['invincible'] = p.invincibleUntil;
         return {
             id: p.id, name: p.name, x: p.x, y: p.y, aim: p.aim,
             hp: p.hp, maxHp: p.maxHp, alive: p.alive, respawnAt: p.respawnAt,
