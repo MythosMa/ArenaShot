@@ -55,9 +55,9 @@ func TestObstacleBlocksAndSlides(t *testing.T) {
 	w := NewWorld(loadTestConfig(t))
 	p := w.AddPlayer("p1", "s1", "Alice")
 
-	// o_1 是中心 (960,540)、160x160 的实心障碍，左边缘 x=880。
-	// 玩家半径 16，最多移动到 x=864。
-	p.X, p.Y = 800, 540
+	// s_7 是中心 (480,624)、384x96 的实心障碍，左边缘 x=288。
+	// 玩家半径 16，最多移动到 x=272。
+	p.X, p.Y = 200, 624
 
 	now := int64(1000)
 	for i := 0; i < 40; i++ {
@@ -66,10 +66,10 @@ func TestObstacleBlocksAndSlides(t *testing.T) {
 		w.Step(now)
 	}
 
-	if p.X > 864.001 {
-		t.Fatalf("玩家穿过了障碍: x=%v（上限 864）", p.X)
+	if p.X > 272.001 {
+		t.Fatalf("玩家穿过了障碍: x=%v（上限 272）", p.X)
 	}
-	if p.X < 850 {
+	if p.X < 258 {
 		t.Fatalf("玩家未能贴近障碍: x=%v", p.X)
 	}
 }
@@ -211,7 +211,7 @@ func TestBreakableObstacleBreaksAndRespawns(t *testing.T) {
 	cfg := loadTestConfig(t)
 	w := NewWorld(cfg)
 	p := w.AddPlayer("p1", "s1", "Alice")
-	p.X, p.Y = 100, 540 // 朝右正对 o_6（中心 240,540）
+	p.X, p.Y = 150, 432 // 朝右正对 b_5（中心 384,432）
 
 	now := int64(1000)
 	for i := 0; i < 200; i++ {
@@ -220,7 +220,7 @@ func TestBreakableObstacleBreaksAndRespawns(t *testing.T) {
 		now += 50
 		var o *obstacle
 		for _, ob := range w.obstacles {
-			if ob.ID == "o_6" {
+			if ob.ID == "b_5" {
 				o = ob
 			}
 		}
@@ -229,13 +229,13 @@ func TestBreakableObstacleBreaksAndRespawns(t *testing.T) {
 		}
 	}
 
-	o := w.findObstacle("o_6")
+	o := w.findObstacle("b_5")
 	if o == nil || !o.Broken {
 		t.Fatalf("可破坏障碍应被击碎: %+v", o)
 	}
 	var got bool
 	for _, ev := range w.DrainEvents() {
-		if ev.Type == protocol.S2CObstacleBroken && ev.Data.(protocol.ObstacleBrokenEvent).ObstacleID == "o_6" {
+		if ev.Type == protocol.S2CObstacleBroken && ev.Data.(protocol.ObstacleBrokenEvent).ObstacleID == "b_5" {
 			got = true
 		}
 	}

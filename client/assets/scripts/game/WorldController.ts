@@ -10,7 +10,7 @@
  */
 
 import {
-    Camera, Color, director, instantiate, Prefab, _decorator, Component, Node, Vec3,
+    Camera, Color, director, instantiate, Prefab, _decorator, Component, Node, Vec3, view,
 } from 'cc';
 import { ObjectPool } from '../core/ObjectPool';
 import { createLogger } from '../core/Logger';
@@ -29,6 +29,7 @@ import { InputController } from './InputController';
 import { LocalMockDriver } from './LocalMockDriver';
 import { DamageTextView } from './view/DamageTextView';
 import { FxManager } from './view/FxManager';
+import { MinimapView } from '../ui/MinimapView';
 
 const { ccclass, property } = _decorator;
 
@@ -74,16 +75,27 @@ export class WorldController extends Component {
     /** fxRoot 下的圆环特效管理器。 */
     private fx!: FxManager;
 
-    // ---- 顿挫 / 屏幕震动 ----
-    /** 震动的承载节点：playersRoot 的父级（世界整体），HUD 不动。 */
+    // ---- 相机跟随 / 顿挫 ----
+    /** 世界根节点：playersRoot 的父级（game_root），整体平移实现镜头跟随与震动。 */
     private _worldRoot: Node | null = null;
-    private _worldBasePos = new Vec3();
+    /** 跟随偏移：世界根需要平移的量，使本地玩家保持在屏幕中央。 */
+    private readonly _followPos = new Vec3();
+    /** 震动偏移，叠加在跟随偏移之上。 */
+    private readonly _shakeOffset = new Vec3();
+    /** 是否已完成首次镜头定位（首帧直接对准，不做平滑）。 */
+    private _hasFollow = false;
     /** 震动剩余时间与总时长（秒）、幅度（像素）。 */
     private _shakeTime = 0;
     private _shakeDurSec = 0.2;
     private _shakeAmp = 0;
     /** 复活检测：上一快照的存活状态，玩家从死到活时在脚下放光环。 */
     private readonly _aliveById = new Map<string, boolean>();
+
+    // ---- 小地图 ----
+    private minimap: MinimapView | null = null;
+    /** 本地模拟模式下小地图的重绘节流累计（秒）。 */
+    private _minimapAccum = 0;
+    private static readonly MINIMAP_INTERVAL_SEC = 0.05;
 
     // ---- P4 断线重连 ----
     /** 正在执行自动重连，避免并发触发多套流程。 */
@@ -123,11 +135,17 @@ export class WorldController extends Component {
         );
         this.viewMgr.initObstacles();
 
-        // 一次性 FX 与屏幕震动：震动挂在「世界根」上，HUD/相机不动。
+        // 一次性 FX 与镜头：跟随/震动都平移「世界根」，HUD/相机不动。
         this.fx = new FxManager(this.fxRoot);
         this._worldRoot = this.playersRoot?.parent ?? null;
         if (this._worldRoot) {
-            this._worldBasePos.set(this._worldRoot.position);
+            this._followPos.set(this._worldRoot.position);
+        }
+
+        // 小地图（运行时创建，挂在 HUD 下，避开编辑器改动）。
+        const hud = this.node.getChildByName('hud');
+        if (hud) {
+            this.minimap = new MinimapView(hud, this.cfg);
         }
 
         this.damageTextPool = new ObjectPool<DamageTextView>(() => {
@@ -159,7 +177,8 @@ export class WorldController extends Component {
     }
 
     protected update(dt: number): void {
-        // 震动在世界根上，两种模式都要更新。
+        // 跟随与震动都作用在世界根上，两种模式都要更新。
+        this._updateCameraFollow(dt);
         this._updateShake(dt);
 
         if (this.netMode) {
@@ -192,6 +211,13 @@ export class WorldController extends Component {
 
         // 消费一次性事件（命中/击杀/道具/障碍）
         this._replayEvents();
+
+        // 小地图按 20Hz 重绘即可，没必要每帧重建 Graphics。
+        this._minimapAccum += dt;
+        if (this._minimapAccum >= WorldController.MINIMAP_INTERVAL_SEC) {
+            this._minimapAccum = 0;
+            this.minimap?.update(snap, this._followPos);
+        }
     }
 
     protected onDestroy(): void {
@@ -199,6 +225,7 @@ export class WorldController extends Component {
         this.inputCtrl?.dispose();
         this.viewMgr?.clearAll();
         this.fx?.dispose();
+        this.minimap?.dispose();
         this._unbindNetHandlers();
         // 离开战斗场景即结束本次对局；重连循环也会因为 _destroyed 退出。
         if (this.netMode) {
@@ -235,6 +262,7 @@ export class WorldController extends Component {
         // 无敌/移速/威力都来自服务端 buff 到期时间戳。
         this._applyBuffVisuals(snap);
         this._detectRespawns(snap.players);
+        this.minimap?.update(snap, this._followPos);
         EventBus.instance.emit(Events.Snapshot, snap);
         EventBus.instance.emit(Events.Leaderboard, snap.leaderboard);
     };
@@ -470,7 +498,7 @@ export class WorldController extends Component {
         }
     }
 
-    // ---------------- 屏幕震动 ----------------
+    // ---------------- 镜头跟随与屏幕震动 ----------------
 
     /** 触发一次震动；震动中再次触发时取较大幅度与剩余时长。 */
     private _shake(amp: number, durSec: number): void {
@@ -479,24 +507,87 @@ export class WorldController extends Component {
         this._shakeTime = this._shakeDurSec;
     }
 
-    /** 每帧推进震动：随机偏移世界根，结束后精确归位（HUD/相机不受影响）。 */
-    private _updateShake(dt: number): void {
-        const root = this._worldRoot;
-        if (!root || !root.isValid) return;
-        if (this._shakeTime <= 0) return;
+    /**
+     * 镜头跟随：平移世界根（game_root），让目标保持在屏幕中央，并夹紧到地图边界。
+     * 轻微平滑（指数趋近）；目标跳变过大（如复活瞬移）时直接落位，避免横穿全图的拖镜。
+     */
+    private _updateCameraFollow(dt: number): void {
+        if (!this._worldRoot || !this.viewMgr) return;
 
+        const t = this._cameraTarget();
+        const vs = view.getVisibleSize();
+        // 世界根不能把可视窗口移出地图边界；单轴不足一屏时保持居中。
+        const maxOx = Math.max(0, (this.map.width - vs.width) / 2);
+        const maxOy = Math.max(0, (this.map.height - vs.height) / 2);
+        const ox = Math.max(-maxOx, Math.min(maxOx, -t.x));
+        const oy = Math.max(-maxOy, Math.min(maxOy, -t.y));
+
+        if (!this._hasFollow
+            || Math.hypot(ox - this._followPos.x, oy - this._followPos.y) > 480) {
+            this._followPos.set(ox, oy, 0);
+            this._hasFollow = true;
+        } else {
+            const k = 1 - Math.exp(-dt * 10);
+            this._followPos.x += (ox - this._followPos.x) * k;
+            this._followPos.y += (oy - this._followPos.y) * k;
+        }
+        this._applyWorldOffset();
+    }
+
+    /** 待聚焦的点（节点空间）：本人（含死亡原地）> 存活玩家质心 > 地图中心。 */
+    private _cameraTarget(): Vec3 {
+        const me = this.viewMgr.findPlayer(GameContext.myPlayerId);
+        if (me) {
+            const p = me.node.position;
+            return new Vec3(p.x, p.y, 0);
+        }
+        const list = this.state.players;
+        if (list.length > 0) {
+            let sx = 0;
+            let sy = 0;
+            let n = 0;
+            for (const q of list) {
+                if (!q.alive) continue;
+                const v = Coord.toNode(q.x, q.y);
+                sx += v.x;
+                sy += v.y;
+                n++;
+            }
+            if (n > 0) return new Vec3(sx / n, sy / n, 0);
+        }
+        return new Vec3(0, 0, 0);
+    }
+
+    /** 每帧推进震动：在跟随偏移上叠加衰减的随机偏移。 */
+    private _updateShake(dt: number): void {
+        if (this._shakeTime <= 0) {
+            if (this._shakeOffset.x !== 0 || this._shakeOffset.y !== 0) {
+                this._shakeOffset.set(0, 0, 0);
+                this._applyWorldOffset();
+            }
+            return;
+        }
         this._shakeTime = Math.max(0, this._shakeTime - dt);
         if (this._shakeTime <= 0) {
-            root.setPosition(this._worldBasePos);
+            this._shakeOffset.set(0, 0, 0);
             this._shakeAmp = 0;
+            this._applyWorldOffset();
             return;
         }
         const k = this._shakeTime / Math.max(0.001, this._shakeDurSec);
         const a = this._shakeAmp * k;
+        this._shakeOffset.set((Math.random() * 2 - 1) * a, (Math.random() * 2 - 1) * a, 0);
+        this._applyWorldOffset();
+    }
+
+    /** 把「跟随 + 震动」汇总后的偏移应用到世界根。 */
+    private _applyWorldOffset(): void {
+        const root = this._worldRoot;
+        if (!root || !root.isValid) return;
         root.setPosition(
-            this._worldBasePos.x + (Math.random() * 2 - 1) * a,
-            this._worldBasePos.y + (Math.random() * 2 - 1) * a,
-            this._worldBasePos.z,
+            this._followPos.x + this._shakeOffset.x,
+            this._followPos.y + this._shakeOffset.y,
+            this._followPos.z,
         );
     }
 
