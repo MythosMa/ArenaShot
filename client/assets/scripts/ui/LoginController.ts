@@ -17,6 +17,8 @@ import {
   KeyCode,
   Label,
   input,
+  ResolutionPolicy,
+  view,
 } from "cc";
 import { GameContext } from "../game/GameContext";
 import { NetClient, defaultWsUrl } from "../net/NetClient";
@@ -32,6 +34,8 @@ export class LoginController extends Component {
   private _starting = false;
 
   protected onLoad(): void {
+    // 统一 16:9 居中显示：超宽屏两侧留黑边，不让视界外的内容被渲染。
+    view.setDesignResolutionSize(1920, 1080, ResolutionPolicy.SHOW_ALL);
     this.startButton?.node?.on(Button.EventType.CLICK, this._onStart, this);
     input.on(Input.EventType.KEY_DOWN, this._onKeyDown, this);
     if (this.statusLabel) this.statusLabel.string = "输入名字，点击开始";

@@ -10,7 +10,7 @@
  */
 
 import {
-    Camera, Color, director, instantiate, Prefab, _decorator, Component, Node, Vec3, view,
+    Camera, Color, director, instantiate, Prefab, Rect, ResolutionPolicy, _decorator, Component, Node, screen, sys, Vec3, view,
 } from 'cc';
 import { ObjectPool } from '../core/ObjectPool';
 import { createLogger } from '../core/Logger';
@@ -26,10 +26,12 @@ import { Coord } from './Coord';
 import { GameState } from './GameState';
 import { EntityViewManager, ViewRoots, ViewPrefabs } from './EntityViewManager';
 import { InputController } from './InputController';
+import { TouchController } from './TouchController';
 import { LocalMockDriver } from './LocalMockDriver';
 import { DamageTextView } from './view/DamageTextView';
 import { FxManager } from './view/FxManager';
 import { MinimapView } from '../ui/MinimapView';
+import { OrientationGuard } from '../ui/OrientationGuard';
 
 const { ccclass, property } = _decorator;
 
@@ -61,6 +63,12 @@ export class WorldController extends Component {
     private driver!: LocalMockDriver;
     private netClient: NetClient | null = null;
     private inputCtrl!: InputController;
+    /** 触屏双摇杆（手机 H5）；桌面无触摸事件时始终空闲。 */
+    private touchCtrl: TouchController | null = null;
+    /** 竖屏提示遮罩。 */
+    private orientation: OrientationGuard | null = null;
+    /** 上一次应用到相机的窗口比例。 */
+    private _cameraAspect = 0;
     private damageTextPool!: ObjectPool<DamageTextView>;
     private camera!: Camera;
     private map!: MapConfigData;
@@ -142,10 +150,23 @@ export class WorldController extends Component {
             this._followPos.set(this._worldRoot.position);
         }
 
-        // 小地图（运行时创建，挂在 HUD 下，避开编辑器改动）。
+        // 小地图、触屏摇杆、横屏提示都运行时创建在 HUD 下，避开编辑器改动。
+        this.camera = this._findCamera();
+        // 设计分辨率 1920×1080；超宽/超高窗口统一按 16:9 居中留黑边。
+        // 关键：Canvas 默认会把相机拉伸到整个窗口宽度，导致「视界之外」的地图内容
+        // 被渲染出来；SHOW_ALL 让引擎自行裁剪，超过设计比例的左右区域只显示清屏色。
+        view.setDesignResolutionSize(1920, 1080, ResolutionPolicy.SHOW_ALL);
+        this._updateCameraViewport();
         const hud = this.node.getChildByName('hud');
         if (hud) {
             this.minimap = new MinimapView(hud, this.cfg);
+            // 只有手机（或显式开启的 ?touch=1 调试模式）才创建触屏 UI。
+            // 不能按「能否收到 EventTouch」判断：Cocos 在无触摸屏的桌面浏览器里
+            // 会把鼠标事件模拟派发成 EventTouch，导致桌面也冒出虚拟摇杆。
+            if (WorldController._useTouchUI()) {
+                this.touchCtrl = new TouchController(hud, this.camera);
+                this.orientation = new OrientationGuard(hud);
+            }
         }
 
         this.damageTextPool = new ObjectPool<DamageTextView>(() => {
@@ -162,7 +183,6 @@ export class WorldController extends Component {
         });
 
         // 3. 数据源与输入：已登录则走网络，否则退回 P1 本地模拟
-        this.camera = this._findCamera();
         this.inputCtrl = new InputController(this.camera);
 
         const net = NetClient.instance;
@@ -177,6 +197,10 @@ export class WorldController extends Component {
     }
 
     protected update(dt: number): void {
+        // 竖屏提示（手机 H5）
+        this.orientation?.tick();
+        this._updateCameraViewport();
+
         // 跟随与震动都作用在世界根上，两种模式都要更新。
         this._updateCameraFollow(dt);
         this._updateShake(dt);
@@ -194,7 +218,9 @@ export class WorldController extends Component {
         if (localView) {
             const wp = localView.node.worldPosition;
             this.inputCtrl.setSelfWorldPos(wp.x, wp.y);
-            this.driver.feedInput(this.inputCtrl.getInput());
+            const req = this.inputCtrl.getInput();
+            if (!this.orientation?.portrait) this.touchCtrl?.apply(req);
+            this.driver.feedInput(req);
         }
 
         // 推进模拟 -> 刷新数据中心 -> 驱动视图
@@ -223,6 +249,8 @@ export class WorldController extends Component {
     protected onDestroy(): void {
         this._destroyed = true;
         this.inputCtrl?.dispose();
+        this.touchCtrl?.dispose();
+        this.orientation?.dispose();
         this.viewMgr?.clearAll();
         this.fx?.dispose();
         this.minimap?.dispose();
@@ -252,7 +280,9 @@ export class WorldController extends Component {
 
         const wp = me.node.worldPosition;
         this.inputCtrl.setSelfWorldPos(wp.x, wp.y);
-        net.sendInput(this.inputCtrl.getInput());
+        const req = this.inputCtrl.getInput();
+        if (!this.orientation?.portrait) this.touchCtrl?.apply(req);
+        net.sendInput(req);
     }
 
     private readonly _onNetSnapshot = (snap: Snapshot): void => {
@@ -500,6 +530,43 @@ export class WorldController extends Component {
 
     // ---------------- 镜头跟随与屏幕震动 ----------------
 
+    /**
+     * 二次保险：把相机限制在 16:9 的中间视口。
+     * Canvas/ResolutionPolicy 在不同预览与 Web 构建模板中的裁剪行为可能不同，
+     * 但 Camera.rect 会直接限制该相机实际提交到渲染管线的区域。
+     */
+    private _updateCameraViewport(): void {
+        const camera = this.camera;
+        if (!camera) return;
+        const ws = screen.windowSize;
+        if (ws.width <= 0 || ws.height <= 0) return;
+        const aspect = ws.width / ws.height;
+        if (Math.abs(aspect - this._cameraAspect) < 0.001) return;
+        this._cameraAspect = aspect;
+
+        const designAspect = 1920 / 1080;
+        const rect = camera.rect;
+        if (aspect > designAspect) {
+            const widthRatio = designAspect / aspect;
+            rect.x = (1 - widthRatio) / 2;
+            rect.y = 0;
+            rect.width = widthRatio;
+            rect.height = 1;
+        } else if (aspect < designAspect) {
+            const heightRatio = aspect / designAspect;
+            rect.x = 0;
+            rect.y = (1 - heightRatio) / 2;
+            rect.width = 1;
+            rect.height = heightRatio;
+        } else {
+            rect.x = 0;
+            rect.y = 0;
+            rect.width = 1;
+            rect.height = 1;
+        }
+        camera.rect = new Rect(rect.x, rect.y, rect.width, rect.height);
+    }
+
     /** 触发一次震动；震动中再次触发时取较大幅度与剩余时长。 */
     private _shake(amp: number, durSec: number): void {
         this._shakeAmp = Math.max(this._shakeAmp, amp);
@@ -592,6 +659,19 @@ export class WorldController extends Component {
     }
 
     // ---------------- 装配 ----------------
+
+    /**
+     * 是否启用触屏 UI。
+     * 手机浏览器为 true；桌面浏览器默认 false（继续用键鼠），
+     * 地址栏追加 ?touch=1 可强制开启，方便在桌面上用鼠标拖拽调试摇杆。
+     */
+    private static _useTouchUI(): boolean {
+        if (sys.isMobile) return true;
+        if (sys.isBrowser && typeof location !== 'undefined') {
+            return /[?&]touch=1(?:&|$)/.test(location.search);
+        }
+        return false;
+    }
 
     private _viewRoots(): ViewRoots {
         return {
