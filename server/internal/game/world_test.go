@@ -251,6 +251,46 @@ func TestBreakableObstacleBreaksAndRespawns(t *testing.T) {
 	}
 }
 
+// TestRespawnedObstaclePushesPlayerOut 回归：可破坏障碍在玩家脚下恢复时，
+// 玩家应被推出障碍并恢复移动，而不是被永久卡在障碍内部。
+func TestRespawnedObstaclePushesPlayerOut(t *testing.T) {
+	cfg := loadTestConfig(t)
+	w := NewWorld(cfg)
+	p := w.AddPlayer("p1", "s1", "Alice")
+	o := w.findObstacle("b_5")
+	if o == nil {
+		t.Fatal("测试配置缺少 b_5")
+	}
+
+	// 手动打碎 b_5，并把玩家放在障碍内部（模拟站在碎块上）。
+	now := int64(1000)
+	o.Broken = true
+	o.HP = 0
+	o.RespawnAt = now + int64(cfg.Obstacles.RespawnMs)
+	p.X, p.Y = o.X+16, o.Y+8
+
+	// 推进到恢复时刻：障碍恢复，玩家应被推出。
+	w.Step(o.RespawnAt)
+
+	if o.Broken || o.HP != cfg.Obstacles.BreakableHp {
+		t.Fatalf("障碍未恢复: broken=%v hp=%d", o.Broken, o.HP)
+	}
+	if w.blockingObstacle(p.X, p.Y, cfg.Player.Radius) != nil {
+		t.Fatalf("障碍恢复后玩家仍卡在内部: (%v, %v)", p.X, p.Y)
+	}
+	if p.X == o.X+16 && p.Y == o.Y+8 {
+		t.Fatal("障碍恢复时玩家未被推出")
+	}
+
+	// 恢复后的下一帧，玩家应能正常移动。
+	x0, y0 := p.X, p.Y
+	w.SetInput("p1", 1, protocol.InputRequest{MoveY: 1}, o.RespawnAt+50)
+	w.Step(o.RespawnAt + 50)
+	if p.X == x0 && p.Y == y0 {
+		t.Fatalf("玩家被卡住，无法移动: (%v, %v)", p.X, p.Y)
+	}
+}
+
 func TestItemSpawnAndPickupAppliesBuff(t *testing.T) {
 	cfg := loadTestConfig(t)
 	w := NewWorld(cfg)

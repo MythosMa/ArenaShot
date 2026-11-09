@@ -284,6 +284,12 @@ func (w *World) Step(nowMs int64) {
 		if o.Broken && nowMs >= o.RespawnAt {
 			o.Broken = false
 			o.HP = w.cfg.Obstacles.BreakableHp
+			// 玩家可能正站在碎块上，恢复后会被困在障碍内无法移动：沿最小穿透方向推出。
+			for _, p := range w.players {
+				if p.Alive {
+					w.resolveObstacleOverlap(p)
+				}
+			}
 		}
 	}
 
@@ -667,10 +673,71 @@ func (w *World) blockingObstacle(x, y, r float64) *obstacle {
 	return nil
 }
 
+// overlapEpsilon 是推出障碍时留出的余量：恰好相切仍会被 circleRectOverlap（<=）判为重叠，
+// 多推一点才能保证完全分离，避免下一帧仍被判定为卡住。
+const overlapEpsilon = 0.01
+
 func circleRectOverlap(cx, cy, cr, rx, ry, rw, rh float64) bool {
 	nx := clamp(cx, rx, rx+rw)
 	ny := clamp(cy, ry, ry+rh)
 	return math.Hypot(cx-nx, cy-ny) <= cr
+}
+
+// resolveObstacleOverlap 把与任一未破坏障碍重叠的玩家沿最小穿透方向推出。
+// 只在可破坏障碍恢复时调用：平时 tryMove 不会让玩家进入障碍，唯一的重叠来源就是
+// 障碍在玩家脚下凭空出现。连锁重叠时迭代处理，最后夹紧到地图边界。
+func (w *World) resolveObstacleOverlap(p *Player) {
+	r := w.cfg.Player.Radius
+	for i := 0; i < 4; i++ {
+		o := w.blockingObstacle(p.X, p.Y, r)
+		if o == nil {
+			break
+		}
+		dx, dy := pushOutOfRect(p.X, p.Y, r, o.X-o.W/2, o.Y-o.H/2, o.W, o.H)
+		if dx == 0 && dy == 0 {
+			break
+		}
+		p.X += dx
+		p.Y += dy
+	}
+	p.X = clamp(p.X, r, w.cfg.Map.Width-r)
+	p.Y = clamp(p.Y, r, w.cfg.Map.Height-r)
+}
+
+// pushOutOfRect 返回把圆心 (cx,cy)、半径 cr 的圆完全推出矩形的最小位移向量。
+func pushOutOfRect(cx, cy, cr, rx, ry, rw, rh float64) (dx, dy float64) {
+	// 圆心在矩形内：向最近的一条边平移，且让半径也越过边线。
+	if cx >= rx && cx <= rx+rw && cy >= ry && cy <= ry+rh {
+		dRight := rx + rw + cr + overlapEpsilon - cx
+		dLeft := cx - (rx - cr - overlapEpsilon)
+		dBottom := ry + rh + cr + overlapEpsilon - cy
+		dTop := cy - (ry - cr - overlapEpsilon)
+		dmin := dRight
+		dx, dy = dRight, 0
+		if dLeft < dmin {
+			dmin, dx, dy = dLeft, -dLeft, 0
+		}
+		if dBottom < dmin {
+			dmin, dx, dy = dBottom, 0, dBottom
+		}
+		if dTop < dmin {
+			dx, dy = 0, -dTop
+		}
+		return dx, dy
+	}
+
+	// 圆心在矩形外：沿最近点方向退出，位移需要覆盖到 cr。
+	nx := clamp(cx, rx, rx+rw)
+	ny := clamp(cy, ry, ry+rh)
+	dist := math.Hypot(cx-nx, cy-ny)
+	if dist <= 0 {
+		return 0, 0
+	}
+	need := cr - dist + overlapEpsilon
+	if need <= 0 {
+		return 0, 0
+	}
+	return (cx - nx) / dist * need, (cy - ny) / dist * need
 }
 
 func clamp(v, lo, hi float64) float64 {
