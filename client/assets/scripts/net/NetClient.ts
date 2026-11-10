@@ -45,16 +45,18 @@ interface PendingRequest {
 /**
  * 默认服务端地址。
  *
- * - 开发预览（http）：直连本机 8080，Cocos 预览服务器与游戏服不同端口。
- * - 生产部署（https）：与页面同源 /ws，由 Nginx 反向代理到 Go 服务，走 WSS。
+ * - 本地调试（localhost）：直连本机 8080，Cocos 预览服务器与游戏服不同端口。
+ * - 部署环境：使用当前真实域名，通过 HTTPS/WSS 和 Nginx 的 /arena-shot/ws 反向代理到 Go 服务。
  * - 其他情况可通过 GameContext.serverUrl 覆盖。
  */
 export function defaultWsUrl(): string {
     if (typeof location !== 'undefined' && location.hostname) {
-        if (location.protocol === 'https:') {
-            return `wss://${location.hostname}/ws`;
+        const hostname = location.hostname;
+        const isLocal = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+        if (isLocal) {
+            return `ws://${hostname}:8080/ws`;
         }
-        return `ws://${location.hostname}:8080/ws`;
+        return `wss://${hostname}/arena-shot/ws`;
     }
     return 'ws://127.0.0.1:8080/ws';
 }

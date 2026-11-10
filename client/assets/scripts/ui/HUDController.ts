@@ -48,6 +48,14 @@ export class HUDController extends Component {
     // EventBus 的 offTarget 按 target 清理
   }
 
+  /** 观战时隐藏只属于本玩家的血量与 Buff 信息，排行榜继续保留。 */
+  setPlayerStatusVisible(visible: boolean): void {
+    this.hpFill?.node && (this.hpFill.node.active = visible);
+    this.hpText?.node && (this.hpText.node.active = visible);
+    this.buffBg?.node && (this.buffBg.node.active = visible);
+    this.buffText?.node && (this.buffText.node.active = visible);
+  }
+
   private _onSnapshot(snap: Snapshot): void {
     const meId = GameContext.myPlayerId;
     const me: PlayerSnapshot | undefined = snap.players.find(

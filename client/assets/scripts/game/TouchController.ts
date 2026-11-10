@@ -50,6 +50,8 @@ export class TouchController {
     private _fire = false;
     /** 是否已经发生过触屏操作：进入触屏模式后始终由触屏接管瞄准。 */
     private _touchMode = false;
+    /** 观战等状态下禁用触屏摇杆。 */
+    private _enabled = true;
 
     private readonly _screen = new Vec3();
     private readonly _world = new Vec3();
@@ -69,9 +71,25 @@ export class TouchController {
         input.on(Input.EventType.TOUCH_CANCEL, this._onTouchEnd, this);
     }
 
+    /** 设置摇杆是否可用。禁用时清理当前触点并隐藏摇杆。 */
+    setEnabled(enabled: boolean): void {
+        if (this._enabled === enabled) return;
+        this._enabled = enabled;
+        if (!enabled) {
+            this._leftTouchId = null;
+            this._rightTouchId = null;
+            this._moveX = 0;
+            this._moveY = 0;
+            this._fire = false;
+            this._touchMode = false;
+            this._leftNode.active = false;
+            this._rightNode.active = false;
+        }
+    }
+
     /** 把触屏输入合并进键鼠采样结果（触屏模式下完全接管这些字段）。 */
     apply(req: InputRequest): void {
-        if (!this._touchMode) return;
+        if (!this._enabled || !this._touchMode) return;
 
         // 触屏模式下完全由摇杆决定，避免松手后回落到鼠标/键盘的残留状态。
         req.moveX = this._leftTouchId !== null ? this._moveX : 0;
@@ -102,6 +120,7 @@ export class TouchController {
     }
 
     private readonly _onTouchStart = (e: EventTouch): void => {
+        if (!this._enabled) return;
         const p = this._toLocal(e);
         // 16:9 保持居中时，屏幕两侧/上下可能有黑边；落在黑边上的触点不算操作。
         if (!this._inside(p)) return;

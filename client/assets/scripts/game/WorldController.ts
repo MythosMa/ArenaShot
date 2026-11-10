@@ -10,7 +10,7 @@
  */
 
 import {
-    Camera, Color, director, instantiate, Prefab, Rect, ResolutionPolicy, _decorator, Component, Node, screen, sys, Vec3, view,
+    Button, Camera, Color, director, instantiate, Label, Prefab, Rect, ResolutionPolicy, _decorator, Component, EventKeyboard, Input, input, KeyCode, Node, screen, sys, Vec3, view,
 } from 'cc';
 import { ObjectPool } from '../core/ObjectPool';
 import { createLogger } from '../core/Logger';
@@ -32,6 +32,7 @@ import { DamageTextView } from './view/DamageTextView';
 import { FxManager } from './view/FxManager';
 import { MinimapView } from '../ui/MinimapView';
 import { OrientationGuard } from '../ui/OrientationGuard';
+import { HUDController } from '../ui/HUDController';
 
 const { ccclass, property } = _decorator;
 
@@ -46,6 +47,12 @@ export class WorldController extends Component {
     @property(Node) obstaclesRoot: Node = null!;
     @property(Node) itemsRoot: Node = null!;
     @property(Node) fxRoot: Node = null!;
+
+    // ---- 观战 HUD（编辑器拖入）----
+    @property(Node) spectatorHud: Node = null!;
+    @property(Label) spectatorTargetName: Label = null!;
+    @property(Button) spectatorPrevButton: Button = null!;
+    @property(Button) spectatorNextButton: Button = null!;
 
     // ---- 预制体（编辑器拖入）----
     @property(Prefab) playerPrefab: Prefab = null!;
@@ -94,6 +101,9 @@ export class WorldController extends Component {
     private _hasFollow = false;
     /** 震动剩余时间与总时长（秒）、幅度（像素）。 */
     private _shakeTime = 0;
+    /** 观战目标玩家 ID；普通玩家为空。 */
+    private _spectatorTargetId = '';
+    private _playerHud: HUDController | null = null;
     private _shakeDurSec = 0.2;
     private _shakeAmp = 0;
     /** 复活检测：上一快照的存活状态，玩家从死到活时在脚下放光环。 */
@@ -159,6 +169,7 @@ export class WorldController extends Component {
         this._updateCameraViewport();
         const hud = this.node.getChildByName('hud');
         if (hud) {
+            this._playerHud = hud.getComponent(HUDController) ?? hud.getComponentInChildren(HUDController);
             this.minimap = new MinimapView(hud, this.cfg);
             // 只有手机（或显式开启的 ?touch=1 调试模式）才创建触屏 UI。
             // 不能按「能否收到 EventTouch」判断：Cocos 在无触摸屏的桌面浏览器里
@@ -184,6 +195,10 @@ export class WorldController extends Component {
 
         // 3. 数据源与输入：已登录则走网络，否则退回 P1 本地模拟
         this.inputCtrl = new InputController(this.camera);
+        input.on(Input.EventType.KEY_DOWN, this._onSpectatorKeyDown, this);
+        this.spectatorPrevButton?.node.on(Button.EventType.CLICK, this._onSpectatorPrev, this);
+        this.spectatorNextButton?.node.on(Button.EventType.CLICK, this._onSpectatorNext, this);
+        this._updateSpectatorHud();
 
         const net = NetClient.instance;
         if (net.isOpen && GameContext.myPlayerId) {
@@ -203,6 +218,7 @@ export class WorldController extends Component {
 
         // 跟随与震动都作用在世界根上，两种模式都要更新。
         this._updateCameraFollow(dt);
+        this._updateSpectatorHud();
         this._updateShake(dt);
 
         if (this.netMode) {
@@ -218,9 +234,11 @@ export class WorldController extends Component {
         if (localView) {
             const wp = localView.node.worldPosition;
             this.inputCtrl.setSelfWorldPos(wp.x, wp.y);
-            const req = this.inputCtrl.getInput();
-            if (!this.orientation?.portrait) this.touchCtrl?.apply(req);
-            this.driver.feedInput(req);
+            if (!this._isSpectator()) {
+                const req = this.inputCtrl.getInput();
+                if (!this.orientation?.portrait) this.touchCtrl?.apply(req);
+                this.driver.feedInput(req);
+            }
         }
 
         // 推进模拟 -> 刷新数据中心 -> 驱动视图
@@ -248,6 +266,9 @@ export class WorldController extends Component {
 
     protected onDestroy(): void {
         this._destroyed = true;
+        input.off(Input.EventType.KEY_DOWN, this._onSpectatorKeyDown, this);
+        this.spectatorPrevButton?.node.off(Button.EventType.CLICK, this._onSpectatorPrev, this);
+        this.spectatorNextButton?.node.off(Button.EventType.CLICK, this._onSpectatorNext, this);
         this.inputCtrl?.dispose();
         this.touchCtrl?.dispose();
         this.orientation?.dispose();
@@ -275,6 +296,8 @@ export class WorldController extends Component {
         this._inputAccumMs -= WorldController.INPUT_INTERVAL_MS;
 
         // 首次快照到达前还没有本地视图，先不上报输入
+        if (this._isSpectator()) return;
+
         const me = this.viewMgr.findPlayer(GameContext.myPlayerId);
         if (!me) return;
 
@@ -601,13 +624,23 @@ export class WorldController extends Component {
         this._applyWorldOffset();
     }
 
-    /** 待聚焦的点（节点空间）：本人（含死亡原地）> 存活玩家质心 > 地图中心。 */
+    /** 待聚焦的点：普通玩家跟随自己，观战玩家跟随选中的目标。 */
     private _cameraTarget(): Vec3 {
+        if (this._isSpectator()) {
+            this._ensureSpectatorTarget();
+            const target = this.state.players.find((p) => p.id === this._spectatorTargetId);
+            if (target) {
+                const v = Coord.toNode(target.x, target.y);
+                return new Vec3(v.x, v.y, 0);
+            }
+        }
+
         const me = this.viewMgr.findPlayer(GameContext.myPlayerId);
         if (me) {
             const p = me.node.position;
             return new Vec3(p.x, p.y, 0);
         }
+
         const list = this.state.players;
         if (list.length > 0) {
             let sx = 0;
@@ -623,6 +656,63 @@ export class WorldController extends Component {
             if (n > 0) return new Vec3(sx / n, sy / n, 0);
         }
         return new Vec3(0, 0, 0);
+    }
+
+    private _isSpectator(): boolean {
+        return GameContext.queuePos > 0 &&
+            !this.state.players.some((p) => p.id === GameContext.myPlayerId);
+    }
+
+    private _ensureSpectatorTarget(): void {
+        if (!this._isSpectator()) {
+            this._spectatorTargetId = '';
+            return;
+        }
+        const current = this.state.players.find(
+            (p) => p.id === this._spectatorTargetId && p.alive,
+        );
+        if (current) return;
+        this._spectatorTargetId = this.state.players.find((p) => p.alive)?.id ?? '';
+    }
+
+    private _onSpectatorKeyDown(event: EventKeyboard): void {
+        if (!this._isSpectator()) return;
+        if (event.keyCode === KeyCode.KEY_Q || event.keyCode === KeyCode.ARROW_LEFT) {
+            this._cycleSpectatorTarget(-1);
+        } else if (event.keyCode === KeyCode.KEY_E || event.keyCode === KeyCode.ARROW_RIGHT) {
+            this._cycleSpectatorTarget(1);
+        }
+    }
+
+    private readonly _onSpectatorPrev = (): void => {
+        this._cycleSpectatorTarget(-1);
+    };
+
+    private readonly _onSpectatorNext = (): void => {
+        this._cycleSpectatorTarget(1);
+    };
+
+    private _updateSpectatorHud(): void {
+        const spectator = this._isSpectator();
+        this.touchCtrl?.setEnabled(!spectator);
+        this._playerHud?.setPlayerStatusVisible(!spectator);
+        if (this.spectatorHud) this.spectatorHud.active = spectator;
+        if (!spectator || !this.spectatorTargetName) return;
+        const target = this.state.players.find((p) => p.id === this._spectatorTargetId);
+        this.spectatorTargetName.string = target
+            ? `当前跟随：${target.name}`
+            : '当前跟随：等待玩家';
+    }
+
+    private _cycleSpectatorTarget(direction: number): void {
+        const targets = this.state.players.filter((p) => p.alive);
+        if (targets.length === 0) {
+            this._spectatorTargetId = '';
+            return;
+        }
+        const index = targets.findIndex((p) => p.id === this._spectatorTargetId);
+        const next = (index + direction + targets.length) % targets.length;
+        this._spectatorTargetId = targets[next].id;
     }
 
     /** 每帧推进震动：在跟随偏移上叠加衰减的随机偏移。 */

@@ -169,6 +169,9 @@ export class EntityViewManager {
             const view = this._obstacles.get(o.id);
             if (view) {
                 view.setBroken(o.broken);
+                if (o.type === 'breakable') {
+                    view.setDamage(o.hp, getConfig().obstacles.breakableHp);
+                }
             }
         }
     }
