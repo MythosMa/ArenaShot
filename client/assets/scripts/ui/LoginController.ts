@@ -19,6 +19,7 @@ import {
   input,
   ResolutionPolicy,
   view,
+  sys,
 } from "cc";
 import { GameContext } from "../game/GameContext";
 import { NetClient, defaultWsUrl } from "../net/NetClient";
@@ -30,6 +31,7 @@ export class LoginController extends Component {
   @property(EditBox) nameInput: EditBox = null!;
   @property(Label) statusLabel: Label = null!;
   @property(Button) startButton: Button = null!;
+  @property(Label) controllerLabel: Label = null!;
 
   private _starting = false;
 
@@ -39,6 +41,12 @@ export class LoginController extends Component {
     this.startButton?.node?.on(Button.EventType.CLICK, this._onStart, this);
     input.on(Input.EventType.KEY_DOWN, this._onKeyDown, this);
     if (this.statusLabel) this.statusLabel.string = "输入名字，点击开始";
+    if (sys.isMobile) {
+      this.controllerLabel.string =
+        "左手触摸控制移动，右手触摸旋转控制设射击和方向";
+    } else {
+      this.controllerLabel.string = "W/S/A/D 控制移动，鼠标控制面向/左键设计";
+    }
   }
 
   protected onDestroy(): void {

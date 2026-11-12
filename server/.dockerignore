@@ -1,0 +1,9 @@
+# 构建上下文裁剪（server/ 目录）
+.git
+.gitignore
+.DS_Store
+bin/
+*.log
+*.tmp
+.idea/
+.vscode/
