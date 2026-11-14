@@ -45,7 +45,7 @@ export class LoginController extends Component {
       this.controllerLabel.string =
         "左手触摸控制移动，右手触摸旋转控制设射击和方向";
     } else {
-      this.controllerLabel.string = "W/S/A/D 控制移动，鼠标控制面向/左键设计";
+      this.controllerLabel.string = "W/S/A/D 控制移动，鼠标控制面向/左键射击";
     }
   }
 

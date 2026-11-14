@@ -56,6 +56,19 @@ export class TouchController {
     private readonly _screen = new Vec3();
     private readonly _world = new Vec3();
     private readonly _p = new Vec3();
+    /** 手指滑出 Canvas/黑边时，Cocos 可能收不到 TOUCH_END；按触点 ID 精确兜底清理。 */
+    private readonly _onWindowTouchEnd = (e: any): void => {
+        const changedTouches = e?.changedTouches ?? [];
+        for (let i = 0; i < changedTouches.length; i++) {
+            this._clearTouch(changedTouches[i].identifier);
+        }
+    };
+    private readonly _onWindowBlur = (): void => this._resetTouchState();
+    private readonly _onVisibilityChange = (): void => {
+        if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+            this._resetTouchState();
+        }
+    };
 
     constructor(parent: Node, private readonly _camera: Camera) {
         this._ui = parent.getComponent(UITransform) ?? parent.addComponent(UITransform);
@@ -69,6 +82,20 @@ export class TouchController {
         input.on(Input.EventType.TOUCH_MOVE, this._onTouchMove, this);
         input.on(Input.EventType.TOUCH_END, this._onTouchEnd, this);
         input.on(Input.EventType.TOUCH_CANCEL, this._onTouchEnd, this);
+
+        // 手指滑出页面、切后台、系统手势/浏览器接管时，Cocos 不一定派发 TOUCH_END。
+        // 这些事件是兜底，不改变正常摇杆的按下/移动/松手流程。
+        // 触屏事件按触点 ID 精确清理，避免多指操作（左手移动+右手开火）时误清另一只摇杆；
+        // blur/隐藏则整组复位（页面都不可见了，复位最安全）。Cocos 原生环境没有
+        // window/document，需要守卫。
+        if (typeof window !== 'undefined') {
+            window.addEventListener('touchend', this._onWindowTouchEnd, { passive: true });
+            window.addEventListener('touchcancel', this._onWindowTouchEnd, { passive: true });
+            window.addEventListener('blur', this._onWindowBlur);
+        }
+        if (typeof document !== 'undefined') {
+            document.addEventListener('visibilitychange', this._onVisibilityChange);
+        }
     }
 
     /** 设置摇杆是否可用。禁用时清理当前触点并隐藏摇杆。 */
@@ -76,14 +103,7 @@ export class TouchController {
         if (this._enabled === enabled) return;
         this._enabled = enabled;
         if (!enabled) {
-            this._leftTouchId = null;
-            this._rightTouchId = null;
-            this._moveX = 0;
-            this._moveY = 0;
-            this._fire = false;
-            this._touchMode = false;
-            this._leftNode.active = false;
-            this._rightNode.active = false;
+            this._resetTouchState();
         }
     }
 
@@ -103,6 +123,15 @@ export class TouchController {
         input.off(Input.EventType.TOUCH_MOVE, this._onTouchMove, this);
         input.off(Input.EventType.TOUCH_END, this._onTouchEnd, this);
         input.off(Input.EventType.TOUCH_CANCEL, this._onTouchEnd, this);
+        if (typeof window !== 'undefined') {
+            window.removeEventListener('touchend', this._onWindowTouchEnd);
+            window.removeEventListener('touchcancel', this._onWindowTouchEnd);
+            window.removeEventListener('blur', this._onWindowBlur);
+        }
+        if (typeof document !== 'undefined') {
+            document.removeEventListener('visibilitychange', this._onVisibilityChange);
+        }
+        this._resetTouchState();
         if (this._leftNode.isValid) this._leftNode.destroy();
         if (this._rightNode.isValid) this._rightNode.destroy();
     }
@@ -154,7 +183,11 @@ export class TouchController {
     };
 
     private readonly _onTouchEnd = (e: EventTouch): void => {
-        const id = e.getID();
+        this._clearTouch(e.getID());
+    };
+
+    /** 精确清理某个触点对应的摇杆状态。 */
+    private _clearTouch(id: number): void {
         if (id === this._leftTouchId) {
             this._leftTouchId = null;
             this._moveX = 0;
@@ -165,7 +198,19 @@ export class TouchController {
             this._fire = false;
             this._rightNode.active = false;
         }
-    };
+    }
+
+    /** 丢失触摸结束事件时，清掉双摇杆全部状态，避免旧方向持续上报。 */
+    private _resetTouchState(): void {
+        this._leftTouchId = null;
+        this._rightTouchId = null;
+        this._moveX = 0;
+        this._moveY = 0;
+        this._fire = false;
+        this._touchMode = false;
+        this._leftNode.active = false;
+        this._rightNode.active = false;
+    }
 
     /**
      * 触点 -> HUD 局部坐标（原点在屏幕中心，y 向上）。
